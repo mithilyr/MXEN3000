@@ -52,7 +52,7 @@ SPEED_MAX = 100
 BENCH_VOLTS_STEP = 1.0         # One - or + press on the bench test panel
 CHART_SAMPLES = 200
 CHART_WIDTH = 640
-CHART_HEIGHT = 200
+CHART_HEIGHT = 140             # Minimum; the chart grows to fill spare height
 ADC_FULL_SCALE = 1023
 SENSOR_SPACING_CM = 3.0          # IR sensors are 3 cm apart, over a 3 cm white line
 LAMP_SIZE = 44
@@ -444,7 +444,8 @@ class RoverGUI:
         self._button(panel, "Calibrate sensors  [C]", self.calibrate).pack(fill=tk.X, pady=(4, 0))
 
     def _build_bench_panel(self, parent):
-        panel = self._panel(parent, "BENCH TEST  (motor volts, stopped only)", fill=tk.X)
+        panel = self._panel(parent, "BENCH TEST  (motor volts, stopped only)", fill=tk.BOTH,
+                            expand=True)   # Stretches so the left column ends level with the right
         self.bench_vars = {}
         self.bench_code_labels = {}
         for name, command in (("Left", p.CMD_SET_DAC_LEFT), ("Right", p.CMD_SET_DAC_RIGHT)):
@@ -472,7 +473,7 @@ class RoverGUI:
                         style="Panel.TCheckbutton", takefocus=0,
                         command=lambda: self._bench_changed(p.CMD_SET_DAC_LEFT)).pack(side=tk.RIGHT)
         buttons = ttk.Frame(panel, style="Plain.TFrame")
-        buttons.pack(fill=tk.X, pady=(4, 0))
+        buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
         self._button(buttons, "Send both", self.send_bench_both).pack(side=tk.LEFT, expand=True, fill=tk.X)
         self._button(buttons, "Both to 0 V", self.bench_neutral).pack(side=tk.LEFT, expand=True,
                                                                      fill=tk.X, padx=(4, 0))

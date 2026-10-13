@@ -1,5 +1,9 @@
 # rover2026 — wireless line-following rover (S2 2026)
 
+![Rover 2026 control GUI: run timer, mode and controller, live sensor chart, PID tuning and lap optimiser](gui_preview.png)
+
+*The control GUI, shown with simulated rover data.*
+
 One firmware and one GUI cover all four competition runs: **Clockwise**, **Anticlockwise**, **Squiggle** and **Reverse**. The PC and the rover talk over a pair of XBees in transparent mode. The track is a stadium-shaped white line on a black table.
 
 This is a clean rewrite. It keeps only the ideas from `../arduino/line_follower` and `../gui/serial_gui.py`: the DAC pin map, the 4-byte checksummed command frame, and neutral = 128. No code from `oldfiles/` is used.
