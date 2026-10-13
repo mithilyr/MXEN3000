@@ -1,0 +1,5 @@
+# Build output (rebuild with gui/build_exe.bat or the Arduino IDE)
+build/
+dist/
+__pycache__/
+*.pyc
