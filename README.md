@@ -100,7 +100,7 @@ Trade-off: the front position is right for Clockwise (compulsory, 6 marks), Anti
 
 Follows the unit's `../Xbee Pairing Guide.pdf` (XBee S2C, transparent mode, 38400 baud).
 
-**Easiest: the GUI's Pair XBees button.** It sends the same settings as the guide's XCTU steps, no XCTU needed. Hardware as in guide steps 1-2: XBee on the V0 shield, shield switch on **USB**, empty sketch uploaded to that Arduino.
+**Easiest: the GUI's Pair XBees button.** It sends the same settings as the guide's XCTU steps, no XCTU needed. Hardware as in guide steps 1-2: XBee on the V0 shield, shield switch on **USB**, empty sketch uploaded to that Arduino. On a breadboard instead of the V0 shield, wire it as a pass-through: XBee DIN to Arduino **D0 (RX)**, XBee DOUT to **D1 (TX)** (the opposite of normal use), XBee on 3.3 V, and a 5 V-to-3.3 V divider on DIN unless the XBee sits on a 5 V adapter board.
 
 1. PC XBee on the shield. Press **Pair XBees**, pick the Arduino's port, press **Program PC XBee**.
 2. Swap in the rover XBee, press **Program rover XBee**. It gets the PC XBee's serial number as its destination.
@@ -109,12 +109,14 @@ Follows the unit's `../Xbee Pairing Guide.pdf` (XBee S2C, transparent mode, 3840
 
 It finds the XBee at 38400 or any other baud rate, writes all settings at once (ATWR, guide step 17), reads them back to check them, remembers both serial numbers in `xbee.json`, and refuses to program the wrong XBee in step 3.
 
+**Zigbee firmware:** the guide sets CE = 0 on both. That links on 802.15.4 firmware, but on Zigbee firmware (the guide's screenshot shows "ZIGBEE TH Reg") one XBee must be the coordinator (CE = 1). The GUI checks the firmware (ATZS): on Zigbee it ticks **PC XBee as coordinator** and sets CE = 1 on the PC XBee in the third pass.
+
 **By hand (XCTU):** follow the guide. The settings it ends up with:
 
 | Setting | PC XBee | Rover XBee | Guide step |
 |---|---|---|---|
 | ID (PAN ID) | random, same on both | same | 11, 19 |
-| CE | `0` | `0` | 12 |
+| CE | `0` (`1` on Zigbee firmware) | `0` | 12 |
 | NI | `PC` | `ROVER` | 14 |
 | BD | `5` (38400) | `5` (38400) | 15 |
 | AP | `0` (transparent) | `0` | 16 |

@@ -133,7 +133,7 @@ class RoverLink:
         return self.port is not None and self.port.is_open
 
     def open(self, device):
-        self.port = serial.Serial(device, BAUD_RATE, timeout=0)
+        self.port = xb.open_port(device, BAUD_RATE)     # No Arduino reset on open
         self.parser = p.TelemetryParser()
         self.reading = True
         self.reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -1332,7 +1332,8 @@ class PairingDialog:
              "1.  PC XBee on the shield: pick the Arduino's port, press Program PC XBee.\n"
              "2.  Swap in the rover XBee: press Program rover XBee.\n"
              "3.  Swap the PC XBee back in: press Program PC XBee again.\n"
-             "Then move each XBee to its own board and press Connect.")
+             "Wiring for a breadboard pass-through: XBee DIN to Arduino D0 (RX), "
+             "DOUT to D1 (TX), 3.3 V supply and a 5 V-to-3.3 V divider on DIN.")
 
     def __init__(self, gui):
         self.gui = gui
@@ -1512,6 +1513,10 @@ class PairingDialog:
                 self.results[job] = payload
                 self.serials[job] = xb.serial_number(payload)
                 self._save()
+                if xb.is_zigbee(payload) and not self.coordinator.get():
+                    self.coordinator.set(True)  # Two CE = 0 Zigbee routers never link
+                    self._append("Zigbee firmware: 'PC XBee as coordinator' is now ticked "
+                                 "for the next PC XBee pass.")
             self._update_status()
         self.window.after(PAIR_POLL_MS, self._poll)
 
@@ -1536,10 +1541,10 @@ class PairingDialog:
         if not problems:
             return ("Paired. Put each XBee on its own board (rover XBee back on the rover), "
                     "switch the rover on, close this window and Connect."), COLOUR_OK
-        if len(problems) == 1 and "DH/DL" in problems[0]:
-            role = xb.ROLE_PC if problems[0].startswith("PC") else xb.ROLE_ROVER
-            return (f"Next: swap the {xb.ROLE_NAMES[role]} XBee back in, press Program "
-                    f"{xb.ROLE_NAMES[role]} XBee again (pass 3 of 3)."), COLOUR_WARN
+        for role, prefix in ((xb.ROLE_PC, "PC"), (xb.ROLE_ROVER, "Rover")):
+            if all(problem.startswith(prefix) for problem in problems):
+                return (f"Next: swap the {xb.ROLE_NAMES[role]} XBee back in, press Program "
+                        f"{xb.ROLE_NAMES[role]} XBee again (pass 3 of 3)."), COLOUR_WARN
         return "Not paired: " + " ".join(problems), COLOUR_BAD
 
     def _update_status(self):

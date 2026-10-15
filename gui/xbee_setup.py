@@ -47,7 +47,9 @@ READ_POLL_S = 0.01
 
 # Read back after writing, to prove the settings stuck.
 CHECK_COMMANDS = ("ID", "CE", "NI", "BD", "AP", "DH", "DL")
-INFO_COMMANDS = ("VR", "HV", "SH", "SL") + CHECK_COMMANDS
+# ZS only exists on Zigbee firmware (802.15.4 firmware answers ERROR).
+IDENTITY_COMMANDS = ("VR", "SH", "SL", "ZS")
+INFO_COMMANDS = ("VR", "HV", "SH", "SL", "ZS") + CHECK_COMMANDS
 
 
 class XBeeError(Exception):
@@ -74,6 +76,25 @@ def random_pan(rng=random):
 def serial_number(settings):
     """(SH, SL) as ints from a read-back dict."""
     return int(settings["SH"], 16), int(settings["SL"], 16)
+
+
+def is_zigbee(settings):
+    """Zigbee firmware (like the guide's 'ZIGBEE TH Reg') needs one coordinator
+    (CE = 1) to form the network; two CE = 0 routers never link. 802.15.4
+    firmware talks peer to peer with CE = 0 on both, as the guide sets it."""
+    return settings.get("ZS", "ERROR") != "ERROR"
+
+
+def open_port(device, baud):
+    """Open without pulsing DTR/RTS, so an Arduino used as a USB pass-through
+    (guide step 2) is not reset. Its bootloader would drive TX (D1) for about a
+    second and talk over the XBee's reply to +++."""
+    port = serial.Serial(baudrate=baud, timeout=0)
+    port.port = device
+    port.dtr = False
+    port.rts = False
+    port.open()
+    return port
 
 
 def format_serial(serial_pair):
@@ -105,7 +126,7 @@ class XBeeAT:
     def __init__(self, device, log=print, opener=None, sleep=time.sleep, clock=time.monotonic):
         self.device = device
         self.log = log
-        self.opener = opener or (lambda dev, baud: serial.Serial(dev, baud, timeout=0))
+        self.opener = opener or open_port
         self.sleep = sleep
         self.clock = clock
         self.port = None
@@ -200,9 +221,11 @@ def program(device, role, pan, peer=None, coordinator=False, log=print, **sessio
     session = XBeeAT(device, log, **session_options)
     session.enter()
     try:
-        identity = session.read(("VR", "SH", "SL"))
+        identity = session.read(IDENTITY_COMMANDS)
         own_serial = serial_number(identity)
-        log(f"Firmware {identity['VR']}, serial number (SH SL) {format_serial(own_serial)}.")
+        firmware = "Zigbee" if is_zigbee(identity) else "802.15.4"
+        log(f"Firmware {identity['VR']} ({firmware}), serial number (SH SL) "
+            f"{format_serial(own_serial)}.")
         if peer is not None and own_serial == tuple(peer):
             other = ROLE_NAMES[ROLE_ROVER if role == ROLE_PC else ROLE_PC]
             raise XBeeError(f"This is the {other} XBee. Swap in the "
@@ -225,6 +248,9 @@ def program(device, role, pan, peer=None, coordinator=False, log=print, **sessio
     target = f", sends to {format_serial(peer)}" if peer is not None else \
         " (no destination yet: program the other XBee next)"
     log(f"Done: {ROLE_NAMES[role]} XBee, PAN {pan:X}, {LINK_BAUD} baud{target}.")
+    if is_zigbee(actual) and role == ROLE_PC and not coordinator:
+        log("Note: Zigbee firmware needs one coordinator. Program the PC XBee once more "
+            "with 'PC XBee as coordinator' ticked.")
     return actual
 
 
@@ -251,4 +277,14 @@ def check_pair(pc_settings, rover_settings):
         destination = (int(sender["DH"], 16), int(sender["DL"], 16))
         if destination != serial_number(receiver):
             problems.append(f"{label} DH/DL does not point at the other XBee yet.")
+    if is_zigbee(pc_settings) and is_zigbee(rover_settings) and             1 not in (_hex_or_none(pc_settings["CE"]), _hex_or_none(rover_settings["CE"])):
+        problems.append("PC XBee must be the coordinator (CE = 1): Zigbee firmware "
+                        "needs one, or the two never link.")
     return problems
+
+
+def _hex_or_none(text):
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None

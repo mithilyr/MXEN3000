@@ -11,8 +11,9 @@ TEXT_SETTINGS = {"NI"}
 class FakeXBee:
     """Answers AT command mode like an XBee S2C at one fixed baud rate."""
 
-    def __init__(self, serial_low=0x4231905E, baud=9600, refuse=()):
+    def __init__(self, serial_low=0x4231905E, baud=9600, refuse=(), zigbee=False):
         self.baud = baud
+        self.zigbee = zigbee
         self.refuse = set(refuse)
         self.flash = {"ID": 0, "CE": 0, "NI": " ", "BD": 3, "AP": 0, "DH": 0, "DL": 0xFFFF,
                       "VR": 0x4061, "HV": 0x2D55, "SH": 0x13A200, "SL": serial_low}
@@ -40,7 +41,9 @@ class FakeXBee:
                 return b"ERROR\r"
             self.settings[name] = value if name in TEXT_SETTINGS else int(value, 16)
             return b"OK\r"
-        setting = self.settings[name]
+        if name == "ZS" and not self.zigbee:
+            return b"ERROR\r"              # 802.15.4 firmware has no ZS
+        setting = self.settings.get(name, 0)
         return (setting if name in TEXT_SETTINGS else f"{setting:X}").encode() + b"\r"
 
 
@@ -93,13 +96,13 @@ def options(xbee):
     return {"opener": xbee.open, "sleep": clock.sleep, "clock": clock, "log": lambda _t: None}
 
 
-def pair(pc, rover, pan=0x1002):
+def pair(pc, rover, pan=0x1002, coordinator=False):
     """The guide's three passes: PC, rover (gets PC serial), PC again (gets rover serial)."""
     first = x.program("COM9", x.ROLE_PC, pan, **options(pc))
     rover_result = x.program("COM9", x.ROLE_ROVER, pan, peer=x.serial_number(first),
                              **options(rover))
     pc_result = x.program("COM9", x.ROLE_PC, pan, peer=x.serial_number(rover_result),
-                          **options(pc))
+                          coordinator=coordinator, **options(pc))
     return pc_result, rover_result
 
 
@@ -118,6 +121,16 @@ class XBeeSetupTests(unittest.TestCase):
         self.assertEqual((rover.flash["DH"], rover.flash["DL"]), (0x13A200, 0x4231905E))
         self.assertEqual((pc.flash["DH"], pc.flash["DL"]), (0x13A200, 0x41B7C2D0))
         self.assertEqual(rover.flash["NI"], "ROVER")
+        self.assertEqual(x.check_pair(pc_result, rover_result), [])
+
+    def test_zigbee_needs_a_coordinator(self):
+        pc, rover = FakeXBee(0x4231905E, zigbee=True), FakeXBee(0x41B7C2D0, zigbee=True)
+        problems = x.check_pair(*pair(pc, rover))
+        self.assertEqual(len(problems), 1)
+        self.assertTrue(problems[0].startswith("PC"))
+        pc_result, rover_result = pair(pc, rover, coordinator=True)
+        self.assertEqual(pc.flash["CE"], 1)
+        self.assertEqual(rover.flash["CE"], 0)
         self.assertEqual(x.check_pair(pc_result, rover_result), [])
 
     def test_after_two_passes_pc_not_pointing_yet(self):

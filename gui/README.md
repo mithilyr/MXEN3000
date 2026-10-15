@@ -54,14 +54,16 @@ Double-click `build_exe.bat`. It takes a few minutes. The new program appears in
 
 Do this if the GUI never shows the green "Link OK". It does the unit's XBee Pairing Guide for you: same PAN ID on both, 38400 baud, transparent mode, and each XBee sends to the other's serial number.
 
-1. Set up the guide's hardware: XBee on the V0 shield, shield switch on **USB**, empty sketch uploaded to the Arduino. Close XCTU.
+1. Set up the guide's hardware: XBee on the V0 shield, shield switch on **USB**, empty sketch uploaded to the Arduino. Close XCTU. On a breadboard instead of the V0 shield, wire it as a pass-through: XBee DIN to Arduino **D0 (RX)**, XBee DOUT to **D1 (TX)** (the opposite of normal use), XBee on 3.3 V, and a 5 V-to-3.3 V divider on DIN unless the XBee sits on a 5 V adapter board.
 2. Put the **PC** XBee on the shield. Click **Pair XBees** (top bar). If you are connected, it asks to disconnect first.
 3. Pick the Arduino's port. Keep the PAN ID or click **New random PAN ID**. Click **Program PC XBee**. Wait for "Done" in the log (up to about 25 seconds).
 4. Swap in the **rover** XBee. Click **Program rover XBee**.
 5. Swap the **PC** XBee back in. Click **Program PC XBee** again.
 6. When the window shows green **Paired**, put each XBee on its own board, close the window and connect (below).
 
-The orange line in the window always says which XBee to put on the shield next. **Read settings** shows what an XBee is set to now, without changing it. Leave **PC XBee as coordinator** unticked (the guide uses CE = 0 on both); tick it and repeat step 3 only if the pair never links.
+The orange line in the window always says which XBee to put on the shield next. **Read settings** shows what an XBee is set to now, without changing it. The rover XBee can't be programmed while it sits on the rover: the PCB wires it for normal use, not pass-through, so it has to go on the shield.
+
+**Zigbee firmware:** the guide sets CE = 0 on both. That links on 802.15.4 firmware, but on Zigbee firmware (the guide's screenshot shows "ZIGBEE TH Reg") one XBee must be the coordinator (CE = 1). The GUI checks the firmware (ATZS): on Zigbee it ticks **PC XBee as coordinator** and sets CE = 1 on the PC XBee in the third pass.
 
 ## Connect to the rover
 
