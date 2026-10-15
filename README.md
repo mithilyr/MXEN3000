@@ -98,26 +98,29 @@ Trade-off: the front position is right for Clockwise (compulsory, 6 marks), Anti
 
 ## XBee setup
 
-**Easiest: the GUI's Pair XBees button.** It does the table below for you over the USB adapter, no XCTU needed:
+Follows the unit's `../Xbee Pairing Guide.pdf` (XBee S2C, transparent mode, 38400 baud).
 
-1. Plug the PC XBee into the USB adapter, press **Pair XBees**, pick its port, press **Program PC XBee**.
-2. Take the XBee off the rover, put it in the same adapter, press **Program rover XBee**.
-3. The window says "Paired" when both match. Put the rover XBee back and press **Connect**.
+**Easiest: the GUI's Pair XBees button.** It sends the same settings as the guide's XCTU steps, no XCTU needed. Hardware as in guide steps 1-2: XBee on the V0 shield, shield switch on **USB**, empty sketch uploaded to that Arduino.
 
-It finds the XBee at any baud rate, saves to flash (ATWR), reads the values back to check them, and warns if you programmed the same XBee twice. **New PAN ID** picks a random one (then program both again). If it reports that `CH` or `MY` was refused, the XBee has ZigBee firmware: flash the 802.15.4 firmware once with XCTU, then pair in the GUI.
+1. PC XBee on the shield. Press **Pair XBees**, pick the Arduino's port, press **Program PC XBee**.
+2. Swap in the rover XBee, press **Program rover XBee**. It gets the PC XBee's serial number as its destination.
+3. Swap the PC XBee back in, press **Program PC XBee** again. It gets the rover's serial number.
+4. The window says "Paired". Put each XBee on its own board and press **Connect**.
 
-**By hand (XCTU):** applies to the S1 / 802.15.4 firmware in transparent (AT) mode. Other XBee models need different settings.
+It finds the XBee at 38400 or any other baud rate, writes all settings at once (ATWR, guide step 17), reads them back to check them, remembers both serial numbers in `xbee.json`, and refuses to program the wrong XBee in step 3.
 
-| Setting | PC XBee | Rover XBee |
-|---|---|---|
-| CH (channel) | same on both, e.g. `C` | same |
-| ID (PAN ID) | same on both, pick a unique one, e.g. `2026` | same |
-| MY | `0` | `1` |
-| DL | `1` | `0` |
-| BD | `3` (9600) | `3` (9600) |
-| AP | `0` (transparent) | `0` |
+**By hand (XCTU):** follow the guide. The settings it ends up with:
 
-Use a unique PAN ID, so you don't pick up another team's rover in the lab.
+| Setting | PC XBee | Rover XBee | Guide step |
+|---|---|---|---|
+| ID (PAN ID) | random, same on both | same | 11, 19 |
+| CE | `0` | `0` | 12 |
+| NI | `PC` | `ROVER` | 14 |
+| BD | `5` (38400) | `5` (38400) | 15 |
+| AP | `0` (transparent) | `0` | 16 |
+| DH / DL | rover's SH / SL | PC's SH / SL | 20, 22 |
+
+The firmware (`LINK_BAUD` in `config.h`) and the GUI both use 38400 to match.
 
 ## Wiring (checked against the PCB schematics in `docs/pcb details/`)
 

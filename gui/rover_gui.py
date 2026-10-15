@@ -40,7 +40,7 @@ import protocol as p
 import xbee_setup as xb
 
 # ---- Link ----
-BAUD_RATE = 9600                # Must match LINK_BAUD in config.h and the XBees
+BAUD_RATE = xb.LINK_BAUD       # 38400 (Pairing Guide step 15) = LINK_BAUD in config.h
 HEARTBEAT_MS = 100              # Rover failsafe is LINK_TIMEOUT_MS = 600
 TELEMETRY_STALE_S = 0.5         # No telemetry for this long = link down
 READ_CHUNK_BYTES = 256
@@ -64,9 +64,7 @@ DEFAULT_LOG_FILE = "run-log.csv"
 RUN_LOG_HEADER = ["date", "division", "attempt", "time_s", "result", "notes"]
 TUNING_FILE = "tuning.json"     # Saved next to the run log, one entry per mode
 OPTIMISER_FILE = "optimizer.json"  # Every rated run, saved next to the run log
-XBEE_FILE = "xbee.json"         # Last PAN ID / channel used by Pair XBees
-XBEE_DEFAULT_PAN = "2026"
-XBEE_DEFAULT_CHANNEL = "C"
+XBEE_FILE = "xbee.json"         # Pair XBees: PAN ID and both serial numbers
 PAIR_POLL_MS = 50
 TUNING_CONFIRM_S = 0.6          # Wait this long for the rover to echo a change
 # Hotkey pairs (increase, decrease) for the tuning slots of the current controller.
@@ -1325,15 +1323,16 @@ class RoverGUI:
 
 
 class PairingDialog:
-    """Programs both XBees through the PC's USB adapter, one after the other,
-    so they share a channel and PAN ID and point at each other (xbee_setup.py)."""
+    """The unit's XBee Pairing Guide (S2C, XCTU) done from the GUI: three passes
+    through the V0 shield, PC -> rover -> PC again, so each XBee ends up with
+    the other's serial number as its destination (xbee_setup.py)."""
 
-    STEPS = ("1.  Plug the PC XBee into the USB adapter, pick its port, press "
-             "Program PC XBee.\n"
-             "2.  Take the XBee off the rover, put it in the same adapter, press "
-             "Program rover XBee.\n"
-             "3.  Put the rover XBee back, switch the rover on, close this window and "
-             "press Connect.")
+    STEPS = ("Hardware (guide steps 1-2): XBee on the V0 shield, shield switch on USB, "
+             "empty sketch uploaded to the Arduino. Close XCTU.\n"
+             "1.  PC XBee on the shield: pick the Arduino's port, press Program PC XBee.\n"
+             "2.  Swap in the rover XBee: press Program rover XBee.\n"
+             "3.  Swap the PC XBee back in: press Program PC XBee again.\n"
+             "Then move each XBee to its own board and press Connect.")
 
     def __init__(self, gui):
         self.gui = gui
@@ -1341,6 +1340,8 @@ class PairingDialog:
         self.busy = False
         self.results = {}               # role: read-back settings from this session
         saved = self._load()
+        self.serials = {role: tuple(saved[f"{role}_serial"]) for role in xb.ROLE_NAMES
+                        if isinstance(saved.get(f"{role}_serial"), list)}
 
         self.window = tk.Toplevel(gui.root)
         self.window.title("Pair XBees")
@@ -1348,7 +1349,7 @@ class PairingDialog:
         self.window.transient(gui.root)
         glass.dark_title_bar(self.window)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
-        panel = gui._panel(self.window, "PAIR XBEES  (802.15.4 / S1, transparent mode)",
+        panel = gui._panel(self.window, "PAIR XBEES  (S2C, as in the XBee Pairing Guide)",
                            fill=tk.BOTH, expand=True, padx=8, pady=8)
         ttk.Label(panel, text=self.STEPS, style="Panel.TLabel", justify=tk.LEFT,
                   wraplength=640).pack(anchor=tk.W, pady=(6, 8))
@@ -1362,10 +1363,11 @@ class PairingDialog:
 
         row = ttk.Frame(panel, style="Plain.TFrame")
         row.pack(fill=tk.X, pady=8)
-        self.pan = self._entry(row, "PAN ID (hex)", saved.get("pan", XBEE_DEFAULT_PAN))
-        self.channel = self._entry(row, "Channel (hex)",
-                                   saved.get("channel", XBEE_DEFAULT_CHANNEL))
-        gui._button(row, "New PAN ID", self.new_pan).pack(side=tk.LEFT, padx=(6, 0))
+        self.pan = self._entry(row, "PAN ID (hex)", saved.get("pan") or f"{xb.random_pan():X}")
+        gui._button(row, "New random PAN ID", self.new_pan).pack(side=tk.LEFT)
+        self.coordinator = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="PC XBee as coordinator (CE=1)", variable=self.coordinator,
+                        style="Panel.TCheckbutton", takefocus=0).pack(side=tk.LEFT, padx=(14, 0))
 
         row = ttk.Frame(panel, style="Plain.TFrame")
         row.pack(fill=tk.X)
@@ -1377,9 +1379,10 @@ class PairingDialog:
         ]
         for button in self.buttons:
             button.pack(side=tk.LEFT, padx=(0, 6))
-        self.status = ttk.Label(panel, text="", style="Panel.TLabel", font=GUIDE_FONT)
+        self.status = ttk.Label(panel, text="", style="Panel.TLabel", font=GUIDE_FONT,
+                                wraplength=640, justify=tk.LEFT)
         self.status.pack(anchor=tk.W, pady=(8, 4))
-        self.log_box = tk.Text(panel, height=14, width=72, bg=COLOUR_PANEL_RAISED,
+        self.log_box = tk.Text(panel, height=14, width=80, bg=COLOUR_PANEL_RAISED,
                                fg=COLOUR_TEXT, font=(READOUT_FONT[0], 10), relief=tk.FLAT,
                                highlightthickness=1, highlightbackground=COLOUR_BORDER,
                                state=tk.DISABLED, takefocus=0)
@@ -1396,27 +1399,31 @@ class PairingDialog:
                          highlightthickness=1, highlightbackground=COLOUR_BORDER,
                          highlightcolor=COLOUR_BLUE)
         entry.insert(0, value)
-        entry.pack(side=tk.LEFT, padx=(6, 14))
+        entry.pack(side=tk.LEFT, padx=6)
         # Leave out the "all" tag, so typing digits/letters here doesn't fire the
         # main window's run hotkeys (1-4 = mode, Space = start, ...).
         entry.bindtags((str(entry), "Entry", str(self.window)))
         return entry
 
-    # ---- settings file ----
+    # ---- settings file: PAN ID and both serial numbers (guide step 13) ----
     def _path(self):
         return os.path.join(os.path.dirname(self.gui.log_path), XBEE_FILE)
 
     def _load(self):
         try:
             with open(self._path(), encoding="utf-8") as saved_file:
-                return json.load(saved_file)
+                saved = json.load(saved_file)
+            return saved if isinstance(saved, dict) else {}
         except (OSError, ValueError):
             return {}
 
-    def _save(self, pan, channel):
+    def _save(self):
+        saved = {"pan": self.pan.get().strip().upper()}
+        saved.update({f"{role}_serial": list(serial_pair)
+                      for role, serial_pair in self.serials.items()})
         try:
             with open(self._path(), "w", encoding="utf-8") as saved_file:
-                json.dump({"pan": f"{pan:X}", "channel": f"{channel:X}"}, saved_file)
+                json.dump(saved, saved_file)
         except OSError:
             pass
 
@@ -1432,36 +1439,39 @@ class PairingDialog:
         self.pan.delete(0, tk.END)
         self.pan.insert(0, f"{xb.random_pan():X}")
         self.results.clear()        # Any XBee programmed before now has the old PAN
-        self._log("New PAN ID: program both XBees again.")
+        self._append("New PAN ID: program both XBees again (all three passes).")
         self._update_status()
 
     def _device(self):
         selection = self.port_box.get()
         if not selection:
-            messagebox.showwarning("No port", "Plug in the USB adapter and press Refresh.",
+            messagebox.showwarning("No port", "Plug in the Arduino and press Refresh.",
                                    parent=self.window)
             return None
         return selection.split(" - ")[0]
 
     def program(self, role):
-        device = self._device()
         try:
             pan = xb.parse_pan(self.pan.get())
-            channel = xb.parse_channel(self.channel.get())
         except xb.XBeeError as error:
-            messagebox.showerror("Check the settings", str(error), parent=self.window)
+            messagebox.showerror("Check the PAN ID", str(error), parent=self.window)
             return
+        device = self._device()
         if device is None:
             return
-        self._save(pan, channel)
-        self._log(f"--- Programming {device} as the {xb.ROLE_NAMES[role]} XBee ---")
-        self._start(role, lambda: xb.program(device, role, pan, channel, log=self._log))
+        other = xb.ROLE_ROVER if role == xb.ROLE_PC else xb.ROLE_PC
+        peer = self.serials.get(other)
+        coordinator = role == xb.ROLE_PC and self.coordinator.get()
+        self._save()
+        self._append(f"--- Programming {device} as the {xb.ROLE_NAMES[role]} XBee ---")
+        self._start(role, lambda: xb.program(device, role, pan, peer, coordinator,
+                                             log=self._log))
 
     def read_settings(self):
         device = self._device()
         if device is None:
             return
-        self._log(f"--- Reading {device} ---")
+        self._append(f"--- Reading {device} ---")
         self._start("read", lambda: xb.read_info(device, log=self._log))
 
     def _start(self, job, work):
@@ -1500,6 +1510,8 @@ class PairingDialog:
                 self._append("  " + "   ".join(f"{k}={v}" for k, v in payload.items()))
             else:
                 self.results[job] = payload
+                self.serials[job] = xb.serial_number(payload)
+                self._save()
             self._update_status()
         self.window.after(PAIR_POLL_MS, self._poll)
 
@@ -1509,22 +1521,30 @@ class PairingDialog:
         self.log_box.see(tk.END)
         self.log_box.config(state=tk.DISABLED)
 
-    def _update_status(self):
+    def _next_step(self):
+        """(text, colour) saying which XBee to put on the shield next."""
         pc, rover = self.results.get(xb.ROLE_PC), self.results.get(xb.ROLE_ROVER)
-        if pc and rover:
-            problems = xb.check_pair(pc, rover)
-            if problems:
-                text, colour = "Not paired: " + " ".join(problems), COLOUR_BAD
-            else:
-                text, colour = ("Paired. Put the rover XBee back, switch the rover on, "
-                                "then Connect."), COLOUR_OK
-        else:
-            done = [name for role, name in xb.ROLE_NAMES.items() if role in self.results]
-            todo = [name for role, name in xb.ROLE_NAMES.items() if role not in self.results]
-            text = (f"Done: {', '.join(done)} XBee.  " if done else "") + \
-                f"Still to program: {', '.join(todo)} XBee."
-            colour = COLOUR_WARN
-        self.status.config(text=text, foreground=colour, wraplength=640)
+        if pc is None and rover is None:
+            return ("Next: PC XBee on the shield, press Program PC XBee "
+                    "(pass 1 of 3)."), COLOUR_WARN
+        if rover is None:
+            return ("Next: swap in the rover XBee, press Program rover XBee "
+                    "(pass 2 of 3)."), COLOUR_WARN
+        if pc is None:
+            return "Next: swap in the PC XBee, press Program PC XBee.", COLOUR_WARN
+        problems = xb.check_pair(pc, rover)
+        if not problems:
+            return ("Paired. Put each XBee on its own board (rover XBee back on the rover), "
+                    "switch the rover on, close this window and Connect."), COLOUR_OK
+        if len(problems) == 1 and "DH/DL" in problems[0]:
+            role = xb.ROLE_PC if problems[0].startswith("PC") else xb.ROLE_ROVER
+            return (f"Next: swap the {xb.ROLE_NAMES[role]} XBee back in, press Program "
+                    f"{xb.ROLE_NAMES[role]} XBee again (pass 3 of 3)."), COLOUR_WARN
+        return "Not paired: " + " ".join(problems), COLOUR_BAD
+
+    def _update_status(self):
+        text, colour = self._next_step()
+        self.status.config(text=text, foreground=colour)
 
     def close(self):
         if self.busy:

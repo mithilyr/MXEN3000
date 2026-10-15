@@ -1,22 +1,23 @@
-"""Checks for xbee_setup.py against a simulated XBee. Run: python test_xbee_setup.py"""
+"""Checks for xbee_setup.py against simulated XBee S2C modules. Run: python test_xbee_setup.py"""
 
 import random
 import unittest
 
 import xbee_setup as x
 
+TEXT_SETTINGS = {"NI"}
+
 
 class FakeXBee:
-    """Answers AT command mode like an XBee S1 at one fixed baud rate."""
+    """Answers AT command mode like an XBee S2C at one fixed baud rate."""
 
-    def __init__(self, baud=9600, refuse=()):
+    def __init__(self, serial_low=0x4231905E, baud=9600, refuse=()):
         self.baud = baud
         self.refuse = set(refuse)
-        self.flash = {"CH": 0xC, "ID": 0x3332, "MY": 0, "DH": 0, "DL": 0, "BD": 3, "AP": 0,
-                      "VR": 0x10EF, "HV": 0x1744, "SH": 0x13A200, "SL": 0x4012ABCD}
+        self.flash = {"ID": 0, "CE": 0, "NI": " ", "BD": 3, "AP": 0, "DH": 0, "DL": 0xFFFF,
+                      "VR": 0x4061, "HV": 0x2D55, "SH": 0x13A200, "SL": serial_low}
         self.settings = dict(self.flash)
         self.command_mode = False
-        self.written = []
         self.opened_at = []
 
     def open(self, _device, baud):
@@ -29,6 +30,7 @@ class FakeXBee:
         name, value = line[2:4], line[4:]
         if name == "CN":
             self.command_mode = False
+            self.baud = (1200 << self.settings["BD"]) if self.settings["BD"] <= 7 else self.baud
             return b"OK\r"
         if name == "WR":
             self.flash = dict(self.settings)
@@ -36,10 +38,10 @@ class FakeXBee:
         if value:
             if name in self.refuse:
                 return b"ERROR\r"
-            self.settings[name] = int(value, 16)
-            self.written.append((name, int(value, 16)))
+            self.settings[name] = value if name in TEXT_SETTINGS else int(value, 16)
             return b"OK\r"
-        return f"{self.settings[name]:X}\r".encode()
+        setting = self.settings[name]
+        return (setting if name in TEXT_SETTINGS else f"{setting:X}").encode() + b"\r"
 
 
 class FakePort:
@@ -86,73 +88,92 @@ class FakeClock:
         return self.now
 
 
-def session_options(xbee):
+def options(xbee):
     clock = FakeClock()
-    return {"opener": xbee.open, "sleep": clock.sleep, "clock": clock}
+    return {"opener": xbee.open, "sleep": clock.sleep, "clock": clock, "log": lambda _t: None}
+
+
+def pair(pc, rover, pan=0x1002):
+    """The guide's three passes: PC, rover (gets PC serial), PC again (gets rover serial)."""
+    first = x.program("COM9", x.ROLE_PC, pan, **options(pc))
+    rover_result = x.program("COM9", x.ROLE_ROVER, pan, peer=x.serial_number(first),
+                             **options(rover))
+    pc_result = x.program("COM9", x.ROLE_PC, pan, peer=x.serial_number(rover_result),
+                          **options(pc))
+    return pc_result, rover_result
 
 
 class XBeeSetupTests(unittest.TestCase):
-    def test_program_pc(self):
+    def test_first_pass_matches_guide_steps_11_to_16(self):
         xbee = FakeXBee()
-        x.program("COM9", x.ROLE_PC, 0x2026, 0xC, log=lambda _t: None, **session_options(xbee))
-        for name, value in (("ID", 0x2026), ("CH", 0xC), ("MY", 0), ("DL", 1), ("BD", 3)):
+        x.program("COM9", x.ROLE_PC, 0x1002, **options(xbee))
+        for name, value in (("ID", 0x1002), ("CE", 0), ("NI", "PC"), ("BD", 5), ("AP", 0)):
             self.assertEqual(xbee.flash[name], value, name)
+        self.assertEqual((xbee.flash["DH"], xbee.flash["DL"]), (0, 0xFFFF))  # Not set yet
         self.assertFalse(xbee.command_mode)
 
-    def test_program_rover(self):
+    def test_three_passes_point_each_at_the_other(self):
+        pc, rover = FakeXBee(0x4231905E), FakeXBee(0x41B7C2D0)
+        pc_result, rover_result = pair(pc, rover)
+        self.assertEqual((rover.flash["DH"], rover.flash["DL"]), (0x13A200, 0x4231905E))
+        self.assertEqual((pc.flash["DH"], pc.flash["DL"]), (0x13A200, 0x41B7C2D0))
+        self.assertEqual(rover.flash["NI"], "ROVER")
+        self.assertEqual(x.check_pair(pc_result, rover_result), [])
+
+    def test_after_two_passes_pc_not_pointing_yet(self):
+        pc, rover = FakeXBee(0x4231905E), FakeXBee(0x41B7C2D0)
+        first = x.program("COM9", x.ROLE_PC, 0x1002, **options(pc))
+        rover_result = x.program("COM9", x.ROLE_ROVER, 0x1002, peer=x.serial_number(first),
+                                 **options(rover))
+        problems = x.check_pair(first, rover_result)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("PC DH/DL", problems[0])
+
+    def test_finds_preconfigured_38400_first(self):
+        xbee = FakeXBee(baud=38400)
+        x.read_info("COM9", **options(xbee))
+        self.assertEqual(xbee.opened_at, [38400])
+
+    def test_factory_9600_moves_to_38400(self):
+        xbee = FakeXBee(baud=9600)
+        x.program("COM9", x.ROLE_PC, 0x1002, **options(xbee))
+        self.assertEqual(xbee.opened_at[:2], [38400, 9600])
+        self.assertEqual(xbee.baud, 38400)
+        x.read_info("COM9", **options(xbee))        # Found again at the new rate
+        self.assertEqual(xbee.opened_at[-1], 38400)
+
+    def test_refuses_to_program_the_peer(self):
+        rover = FakeXBee(0x41B7C2D0)
+        with self.assertRaisesRegex(x.XBeeError, "rover XBee"):
+            x.program("COM9", x.ROLE_PC, 0x1002, peer=(0x13A200, 0x41B7C2D0), **options(rover))
+        self.assertEqual(rover.flash["ID"], 0)      # Nothing written
+
+    def test_same_xbee_twice(self):
         xbee = FakeXBee()
-        x.program("COM9", x.ROLE_ROVER, 0x2026, 0xC, log=lambda _t: None, **session_options(xbee))
-        self.assertEqual((xbee.flash["MY"], xbee.flash["DL"]), (1, 0))
-
-    def test_finds_other_baud_and_resets_to_9600(self):
-        xbee = FakeXBee(baud=115200)
-        x.program("COM9", x.ROLE_PC, 0x2026, 0xC, log=lambda _t: None, **session_options(xbee))
-        self.assertEqual(xbee.opened_at[:2], [9600, 115200])
-        self.assertEqual(xbee.flash["BD"], 3)
-
-    def test_no_xbee(self):
-        xbee = FakeXBee(baud=1)
-        with self.assertRaises(x.XBeeError):
-            x.read_info("COM9", log=lambda _t: None, **session_options(xbee))
-
-    def test_zigbee_firmware_explained(self):
-        xbee = FakeXBee(refuse={"CH", "MY"})
-        with self.assertRaisesRegex(x.XBeeError, "802.15.4"):
-            x.program("COM9", x.ROLE_PC, 0x2026, 0xC, log=lambda _t: None,
-                      **session_options(xbee))
-        self.assertNotEqual(xbee.flash["ID"], 0x2026)   # Nothing saved
-
-    def test_read_info(self):
-        info = x.read_info("COM9", log=lambda _t: None, **session_options(FakeXBee()))
-        self.assertEqual(info["ID"], "3332")
-        self.assertEqual(info["VR"], "10EF")
-
-    def test_check_pair(self):
-        pc = {"CH": "C", "ID": "2026", "MY": "0", "DL": "1", "BD": "3"}
-        rover = {"CH": "C", "ID": "2026", "MY": "1", "DL": "0", "BD": "3"}
-        self.assertEqual(x.check_pair(pc, rover), [])
-        self.assertEqual(len(x.check_pair(pc, dict(rover, ID="2027", MY="0"))), 2)
-
-    def test_check_pair_same_xbee_twice(self):
-        xbee = FakeXBee()
-        options = session_options(xbee)
-        pc = x.program("COM9", x.ROLE_PC, 0x2026, 0xC, log=lambda _t: None, **options)
-        rover = x.program("COM9", x.ROLE_ROVER, 0x2026, 0xC, log=lambda _t: None, **options)
+        pc = x.program("COM9", x.ROLE_PC, 0x1002, **options(xbee))
+        rover = x.program("COM9", x.ROLE_ROVER, 0x1002, **options(xbee))
         self.assertRegex(x.check_pair(pc, rover)[0], "same XBee")
 
+    def test_refused_setting_saves_nothing(self):
+        xbee = FakeXBee(refuse={"CE"})
+        with self.assertRaisesRegex(x.XBeeError, "ATCE0"):
+            x.program("COM9", x.ROLE_PC, 0x1002, **options(xbee))
+        self.assertEqual(xbee.flash["ID"], 0)
+
+    def test_no_xbee(self):
+        with self.assertRaisesRegex(x.XBeeError, "V0 shield"):
+            x.read_info("COM9", **options(FakeXBee(baud=1)))
+
     def test_parsing(self):
-        self.assertEqual(x.parse_pan("0x2026"), 0x2026)
-        self.assertEqual(x.parse_channel("c"), 0xC)
-        for bad in ("G1", "", "10000"):
+        self.assertEqual(x.parse_pan("0x1002"), 0x1002)
+        for bad in ("G1", "", "0", "10000"):
             with self.assertRaises(x.XBeeError):
                 x.parse_pan(bad)
-        with self.assertRaises(x.XBeeError):
-            x.parse_channel("1B")
 
-    def test_random_pan_avoids_factory(self):
+    def test_random_pan_in_range(self):
         rng = random.Random(1)
         for _ in range(200):
-            self.assertNotEqual(x.random_pan(rng), x.FACTORY_PAN)
+            self.assertTrue(x.PAN_MIN <= x.random_pan(rng) <= x.PAN_MAX)
 
 
 if __name__ == "__main__":

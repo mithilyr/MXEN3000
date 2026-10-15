@@ -52,15 +52,16 @@ Double-click `build_exe.bat`. It takes a few minutes. The new program appears in
 
 ## Pair the two XBees (once)
 
-Do this if the GUI never shows the green "Link OK". It sets both XBees to the same channel and PAN ID and points them at each other.
+Do this if the GUI never shows the green "Link OK". It does the unit's XBee Pairing Guide for you: same PAN ID on both, 38400 baud, transparent mode, and each XBee sends to the other's serial number.
 
-1. Plug the **PC** XBee into the USB adapter. Click **Pair XBees** (top bar). If you are connected, it asks to disconnect first.
-2. Pick the adapter's port. Keep the PAN ID and channel, or click **New PAN ID**.
-3. Click **Program PC XBee**. Wait for "Done" in the log (up to about 25 seconds if the XBee is at an unusual baud rate).
-4. Take the XBee off the rover and put it in the same adapter. Click **Program rover XBee**.
-5. When the window shows green **Paired**, put the rover XBee back, close the window and connect (below).
+1. Set up the guide's hardware: XBee on the V0 shield, shield switch on **USB**, empty sketch uploaded to the Arduino. Close XCTU.
+2. Put the **PC** XBee on the shield. Click **Pair XBees** (top bar). If you are connected, it asks to disconnect first.
+3. Pick the Arduino's port. Keep the PAN ID or click **New random PAN ID**. Click **Program PC XBee**. Wait for "Done" in the log (up to about 25 seconds).
+4. Swap in the **rover** XBee. Click **Program rover XBee**.
+5. Swap the **PC** XBee back in. Click **Program PC XBee** again.
+6. When the window shows green **Paired**, put each XBee on its own board, close the window and connect (below).
 
-**Read settings** shows what an XBee is set to now, without changing it. Close XCTU first: only one program can use the port.
+The orange line in the window always says which XBee to put on the shield next. **Read settings** shows what an XBee is set to now, without changing it. Leave **PC XBee as coordinator** unticked (the guide uses CE = 0 on both); tick it and repeat step 3 only if the pair never links.
 
 ## Connect to the rover
 
@@ -182,7 +183,7 @@ You can open both in Excel. Use **Change log file** in the GUI to save somewhere
 |---|---|
 | The port list is empty | Plug in the XBee, then click Refresh. |
 | "Could not open port" | Another program (for example XCTU) is using the port. Close it. |
-| Orange "no telemetry" | Check the rover is on. Check both XBees use the same channel and PAN ID, and 9600 baud. See `../README.md`. |
+| Orange "no telemetry" | Check the rover is on. Run **Pair XBees** again (same PAN ID, 38400 baud, each pointing at the other). See `../README.md`. |
 | Space or keys do nothing | Click on the GUI window first. Keys 1 to 4 and C do nothing while the rover is running. |
 | `No module named serial` | Run `python -m pip install pyserial`. |
 | The rover steers away from the line | Change `steerSign` in `firmware/rover2026/config.h` for that mode and upload again. |

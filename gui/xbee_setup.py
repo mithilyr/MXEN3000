@@ -1,10 +1,20 @@
-"""Pairs two XBee S1 (802.15.4) radios from the GUI, so XCTU is not needed.
+"""Pairs two XBee S2C radios from the GUI, following the unit's
+"Xbee Pairing Guide.pdf" (../../Xbee Pairing Guide.pdf) without XCTU.
 
-Uses Digi's documented AT command mode: guard time of silence, "+++", wait
-for "OK", then one "AT<cmd><value>\\r" per setting, "ATWR" to save to flash
-and "ATCN" to leave. Each XBee is programmed in turn through the PC's USB
-adapter: the PC one as MY=0 / DL=1, the rover one as MY=1 / DL=0, both on
-the same channel and PAN ID (the table in ../README.md "XBee setup").
+The guide's XCTU steps, as AT commands (Digi's documented command mode:
+guard time of silence, "+++", wait for "OK", one "AT<cmd><value>\\r" per
+setting, then one "ATWR" to save everything at once, step 17):
+
+    step 11/19  ID  same random PAN ID on both
+    step 12     CE  0
+    step 13     SH / SL read and remembered (the module's serial number)
+    step 14     NI  a name: "PC" or "ROVER"
+    step 15     BD  5 (38400 baud)
+    step 16     AP  0 (transparent mode)
+    step 20/22  DH / DL = the other module's SH / SL
+
+So it takes three passes through the USB adapter, like the guide: PC XBee,
+rover XBee (gets the PC's serial), PC XBee again (gets the rover's serial).
 
 Kept free of Tkinter so test_xbee_setup.py can drive it with a fake port.
 """
@@ -17,16 +27,17 @@ import serial
 ROLE_PC = "pc"
 ROLE_ROVER = "rover"
 ROLE_NAMES = {ROLE_PC: "PC", ROLE_ROVER: "rover"}
-ROLE_ADDRESSES = {ROLE_PC: (0, 1), ROLE_ROVER: (1, 0)}   # role: (MY, DL)
+NODE_NAMES = {ROLE_PC: "PC", ROLE_ROVER: "ROVER"}       # NI, guide step 14
 
-LINK_BAUD_CODE = 3              # BD = 3 is 9600 baud, the rover's LINK_BAUD
-TRANSPARENT_MODE = 0            # AP = 0
-# Baud rates to try when looking for the XBee, link rate first.
-SEARCH_BAUDS = (9600, 115200, 57600, 38400, 19200, 4800, 2400, 1200)
-CHANNEL_MIN = 0x0B              # XBee S1. XBee-PRO S1 only allows 0x0C-0x17.
-CHANNEL_MAX = 0x1A
-PAN_MAX = 0xFFFF
-FACTORY_PAN = 0x3332            # Every team's XBee starts on this, so avoid it
+LINK_BAUD = 38400               # Guide step 15; must match LINK_BAUD in config.h
+LINK_BAUD_CODE = 5              # BD = 5 is 38400 baud
+TRANSPARENT_MODE = 0            # AP = 0, guide step 16
+COORDINATOR_OFF = 0             # CE = 0, guide step 12
+# Baud rates to try when looking for the XBee: pre-configured (guide step 6),
+# then factory default, then the rest.
+SEARCH_BAUDS = (38400, 9600, 115200, 57600, 19200, 4800, 2400, 1200)
+PAN_MIN = 1                     # ID = 0 makes a ZigBee module pick any PAN
+PAN_MAX = 0xFFFF                # The guide's random IDs are this size (e.g. 1002)
 
 GUARD_TIME_S = 1.1              # Factory GT is 1 s of silence around "+++"
 OK_TIMEOUT_S = 2.0              # "OK" comes one guard time after "+++"
@@ -35,7 +46,7 @@ FLASH_WRITE_TIMEOUT_S = 3.0     # ATWR can take a moment
 READ_POLL_S = 0.01
 
 # Read back after writing, to prove the settings stuck.
-CHECK_COMMANDS = ("CH", "ID", "MY", "DH", "DL", "BD", "AP")
+CHECK_COMMANDS = ("ID", "CE", "NI", "BD", "AP", "DH", "DL")
 INFO_COMMANDS = ("VR", "HV", "SH", "SL") + CHECK_COMMANDS
 
 
@@ -43,39 +54,44 @@ class XBeeError(Exception):
     pass
 
 
-def parse_hex(text, name, low, high):
-    """'2026' -> 0x2026. XBee AT values are always hex."""
+def parse_pan(text):
+    """'1002' -> 0x1002. XBee AT values are always hex."""
     cleaned = text.strip().upper().removeprefix("0X")
     try:
         value = int(cleaned, 16)
     except ValueError:
-        raise XBeeError(f"{name} must be hex (0-9, A-F), not '{text}'.") from None
-    if not low <= value <= high:
-        raise XBeeError(f"{name} must be between {low:X} and {high:X} (hex).")
+        raise XBeeError(f"PAN ID must be hex (0-9, A-F), not '{text}'.") from None
+    if not PAN_MIN <= value <= PAN_MAX:
+        raise XBeeError(f"PAN ID must be between {PAN_MIN:X} and {PAN_MAX:X} (hex).")
     return value
 
 
-def parse_pan(text):
-    return parse_hex(text, "PAN ID", 0, PAN_MAX)
-
-
-def parse_channel(text):
-    return parse_hex(text, "Channel", CHANNEL_MIN, CHANNEL_MAX)
-
-
 def random_pan(rng=random):
-    """A PAN ID unlikely to clash with another team in the lab."""
-    while True:
-        pan = rng.randint(0x0100, 0xFFFE)
-        if pan != FACTORY_PAN:
-            return pan
+    """Guide step 11: a random PAN ID, so another team's XBees can't join."""
+    return rng.randint(0x0100, PAN_MAX)
 
 
-def role_settings(role, pan, channel):
-    """The (command, value) pairs that make an XBee the PC or rover end."""
-    my_address, destination = ROLE_ADDRESSES[role]
-    return [("CH", channel), ("ID", pan), ("MY", my_address), ("DH", 0),
-            ("DL", destination), ("BD", LINK_BAUD_CODE), ("AP", TRANSPARENT_MODE)]
+def serial_number(settings):
+    """(SH, SL) as ints from a read-back dict."""
+    return int(settings["SH"], 16), int(settings["SL"], 16)
+
+
+def format_serial(serial_pair):
+    return f"{serial_pair[0]:X} {serial_pair[1]:08X}"
+
+
+def role_settings(role, pan, peer=None, coordinator=False):
+    """The (command, value) pairs for guide steps 11-16, plus 20/22 when the
+    other module's (SH, SL) is known. Values are ints, except NI (text)."""
+    settings = [("ID", pan), ("CE", 1 if coordinator else COORDINATOR_OFF),
+                ("NI", NODE_NAMES[role]), ("BD", LINK_BAUD_CODE), ("AP", TRANSPARENT_MODE)]
+    if peer is not None:
+        settings += [("DH", peer[0]), ("DL", peer[1])]
+    return settings
+
+
+def _value_text(value):
+    return value if isinstance(value, str) else f"{value:X}"
 
 
 class XBeeAT:
@@ -97,7 +113,7 @@ class XBeeAT:
 
     # ---- low level ----
     def _read_line(self, timeout):
-        """Bytes up to the XBee's '\\r', or None on timeout."""
+        """Text up to the XBee's '\\r', or None on timeout."""
         line = bytearray()
         deadline = self.clock() + timeout
         while self.clock() < deadline:
@@ -125,22 +141,23 @@ class XBeeAT:
 
     # ---- public ----
     def enter(self, bauds=SEARCH_BAUDS):
-        """Find the XBee's baud rate and put it in command mode."""
+        """Find the XBee's baud rate and put it in command mode (guide step 9)."""
         for baud in bauds:
-            self.log(f"Looking for an XBee at {baud} baud...")
+            self.log(f"Sending +++ at {baud} baud...")
             try:
                 if self._try_enter(baud):
-                    self.log(f"XBee answered at {baud} baud.")
+                    self.log(f"OK received at {baud} baud.")
                     return
             except serial.SerialException as error:
                 raise XBeeError(f"Could not open {self.device}: {error}") from None
         raise XBeeError(
-            "No XBee answered. Check it is seated the right way round in the USB "
-            "adapter, the GUI is not connected to this port, and XCTU is closed.")
+            "No XBee answered +++. On the V0 shield: switch on 'USB' and an empty sketch "
+            "uploaded to the Arduino (guide steps 1-2). Also close XCTU and Disconnect "
+            "the GUI, so nothing else holds the port.")
 
     def command(self, name, value=None, timeout=COMMAND_TIMEOUT_S):
-        """Send ATxx (read) or ATxx<hex> (write); return the XBee's reply."""
-        text = f"AT{name}" + ("" if value is None else f"{value:X}")
+        """Send ATxx (read) or ATxx<value> (write); return the XBee's reply."""
+        text = f"AT{name}" + ("" if value is None else _value_text(value))
         self.port.write(text.encode("ascii") + b"\r")
         reply = self._read_line(timeout)
         if reply is None:
@@ -150,7 +167,7 @@ class XBeeAT:
     def set(self, name, value):
         reply = self.command(name, value)
         if reply != "OK":
-            raise XBeeError(_refused_message(name, value, reply))
+            raise XBeeError(f"XBee refused AT{name}{_value_text(value)} (replied '{reply}').")
 
     def read(self, names):
         return {name: self.command(name) for name in names}
@@ -166,16 +183,6 @@ class XBeeAT:
         self.port = None
 
 
-def _refused_message(name, value, reply):
-    message = f"XBee refused AT{name}{value:X} (replied '{reply}')."
-    if name == "CH":
-        message += " XBee-PRO S1 only allows channels C to 17: pick one in that range."
-    if name in ("CH", "MY"):
-        message += (" ZigBee (S2/S2C/XBee3 Zigbee) firmware also refuses it. The rover "
-                    "needs 802.15.4 firmware: flash it once with XCTU, then pair here.")
-    return message
-
-
 def read_info(device, log=print, **session_options):
     """Return the current settings of the XBee on `device`."""
     session = XBeeAT(device, log, **session_options)
@@ -186,53 +193,62 @@ def read_info(device, log=print, **session_options):
         session.close()
 
 
-def program(device, role, pan, channel, log=print, **session_options):
-    """Write the role's settings to flash and check them. Returns the read-back."""
-    wanted = role_settings(role, pan, channel)
+def program(device, role, pan, peer=None, coordinator=False, log=print, **session_options):
+    """Guide steps 9-17 (and 20/22 when `peer`, the other module's (SH, SL), is
+    known). Refuses to program the peer itself. Returns the read-back settings."""
+    wanted = role_settings(role, pan, peer, coordinator)
     session = XBeeAT(device, log, **session_options)
     session.enter()
     try:
-        firmware = session.command("VR")
-        log(f"Firmware version {firmware}.")
+        identity = session.read(("VR", "SH", "SL"))
+        own_serial = serial_number(identity)
+        log(f"Firmware {identity['VR']}, serial number (SH SL) {format_serial(own_serial)}.")
+        if peer is not None and own_serial == tuple(peer):
+            other = ROLE_NAMES[ROLE_ROVER if role == ROLE_PC else ROLE_PC]
+            raise XBeeError(f"This is the {other} XBee. Swap in the "
+                            f"{ROLE_NAMES[role]} XBee and try again.")
         for name, value in wanted:
-            log(f"  AT{name} {value:X}")
+            log(f"  AT{name} {_value_text(value)}")
             session.set(name, value)
-        log("Saving to flash (ATWR)...")
+        log("Writing all parameters at once (ATWR)...")
         reply = session.command("WR", timeout=FLASH_WRITE_TIMEOUT_S)
         if reply != "OK":
             raise XBeeError(f"XBee could not save its settings (ATWR replied '{reply}').")
-        actual = session.read(CHECK_COMMANDS + ("SH", "SL"))
+        actual = session.read(CHECK_COMMANDS)
+        actual.update(identity)
     finally:
         session.close()
-    wrong = [name for name, value in wanted if _hex_value(actual[name]) != value]
+    wrong = [name for name, value in wanted if not _matches(actual[name], value)]
     if wrong:
         raise XBeeError("Settings did not stick: " +
                         ", ".join(f"{name}={actual[name]}" for name in wrong))
-    log(f"Done: this XBee is now the {ROLE_NAMES[role]} end "
-        f"(CH {channel:X}, PAN {pan:X}, MY {ROLE_ADDRESSES[role][0]}, "
-        f"DL {ROLE_ADDRESSES[role][1]}, 9600 baud).")
+    target = f", sends to {format_serial(peer)}" if peer is not None else \
+        " (no destination yet: program the other XBee next)"
+    log(f"Done: {ROLE_NAMES[role]} XBee, PAN {pan:X}, {LINK_BAUD} baud{target}.")
     return actual
 
 
-def _hex_value(text):
+def _matches(reply, value):
+    if isinstance(value, str):
+        return reply == value
     try:
-        return int(text, 16)
+        return int(reply, 16) == value
     except ValueError:
-        return None
+        return False
 
 
 def check_pair(pc_settings, rover_settings):
     """Problems that would stop two read-back setting dicts from talking."""
+    if serial_number(pc_settings) == serial_number(rover_settings):
+        return ["Both were the same XBee. Swap in the other one and program it."]
     problems = []
-    if (pc_settings.get("SH"), pc_settings.get("SL")) == \
-            (rover_settings.get("SH"), rover_settings.get("SL")) and "SL" in pc_settings:
-        problems.append("Both were the same XBee. Swap in the other one and program it.")
-    for name, label in (("CH", "channel"), ("ID", "PAN ID"), ("BD", "baud rate")):
-        if _hex_value(pc_settings[name]) != _hex_value(rover_settings[name]):
+    for name, label in (("ID", "PAN ID"), ("BD", "baud rate"), ("AP", "AP mode")):
+        if not _matches(pc_settings[name], int(rover_settings[name], 16)):
             problems.append(f"Different {label}: PC {pc_settings[name]}, "
                             f"rover {rover_settings[name]}.")
-    if _hex_value(pc_settings["DL"]) != _hex_value(rover_settings["MY"]):
-        problems.append("PC DL does not match the rover's MY.")
-    if _hex_value(rover_settings["DL"]) != _hex_value(pc_settings["MY"]):
-        problems.append("Rover DL does not match the PC's MY.")
+    for sender, receiver, label in ((pc_settings, rover_settings, "PC"),
+                                    (rover_settings, pc_settings, "Rover")):
+        destination = (int(sender["DH"], 16), int(sender["DL"], 16))
+        if destination != serial_number(receiver):
+            problems.append(f"{label} DH/DL does not point at the other XBee yet.")
     return problems

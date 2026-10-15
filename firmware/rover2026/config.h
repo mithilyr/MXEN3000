@@ -15,7 +15,7 @@
 //     status LED is then disabled because D13 is used by the link.
 #define LINK_USE_SOFTWARE_SERIAL 0
 
-constexpr unsigned long LINK_BAUD = 9600;   // XBee factory default (BD = 3)
+constexpr unsigned long LINK_BAUD = 38400;  // BD = 5, per the XBee Pairing Guide
 constexpr byte SOFT_SERIAL_RX_PIN = 12;     // Wire to XBee DOUT
 constexpr byte SOFT_SERIAL_TX_PIN = 13;     // Wire to XBee DIN
 
