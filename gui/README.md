@@ -50,6 +50,18 @@ python rover_gui.py
 
 Double-click `build_exe.bat`. It takes a few minutes. The new program appears in `dist\RoverControl.exe`. Do this again after any change to `rover_gui.py`.
 
+## Pair the two XBees (once)
+
+Do this if the GUI never shows the green "Link OK". It sets both XBees to the same channel and PAN ID and points them at each other.
+
+1. Plug the **PC** XBee into the USB adapter. Click **Pair XBees** (top bar). If you are connected, it asks to disconnect first.
+2. Pick the adapter's port. Keep the PAN ID and channel, or click **New PAN ID**.
+3. Click **Program PC XBee**. Wait for "Done" in the log (up to about 25 seconds if the XBee is at an unusual baud rate).
+4. Take the XBee off the rover and put it in the same adapter. Click **Program rover XBee**.
+5. When the window shows green **Paired**, put the rover XBee back, close the window and connect (below).
+
+**Read settings** shows what an XBee is set to now, without changing it. Close XCTU first: only one program can use the port.
+
 ## Connect to the rover
 
 1. Plug the PC-side XBee into USB.

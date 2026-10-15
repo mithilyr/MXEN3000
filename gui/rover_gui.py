@@ -37,6 +37,7 @@ from serial.tools import list_ports
 import glass
 import optimizer as opt
 import protocol as p
+import xbee_setup as xb
 
 # ---- Link ----
 BAUD_RATE = 9600                # Must match LINK_BAUD in config.h and the XBees
@@ -63,6 +64,10 @@ DEFAULT_LOG_FILE = "run-log.csv"
 RUN_LOG_HEADER = ["date", "division", "attempt", "time_s", "result", "notes"]
 TUNING_FILE = "tuning.json"     # Saved next to the run log, one entry per mode
 OPTIMISER_FILE = "optimizer.json"  # Every rated run, saved next to the run log
+XBEE_FILE = "xbee.json"         # Last PAN ID / channel used by Pair XBees
+XBEE_DEFAULT_PAN = "2026"
+XBEE_DEFAULT_CHANNEL = "C"
+PAIR_POLL_MS = 50
 TUNING_CONFIRM_S = 0.6          # Wait this long for the rover to echo a change
 # Hotkey pairs (increase, decrease) for the tuning slots of the current controller.
 TUNING_KEYS = (("q", "a"), ("w", "s"), ("e", "d"), ("r", "f"))
@@ -332,6 +337,7 @@ class RoverGUI:
         self._button(row, "Refresh", self.refresh_ports).pack(side=tk.LEFT)
         self.connect_button = self._button(row, "Connect", self.toggle_connection)
         self.connect_button.pack(side=tk.LEFT, padx=(6, 0))
+        self._button(row, "Pair XBees", self.open_pairing).pack(side=tk.LEFT, padx=(6, 0))
         self.link_label = ttk.Label(controls, text="\u25cf Disconnected", style="Panel.TLabel",
                                     foreground=COLOUR_BAD)
         self.link_label.pack(anchor=tk.E, pady=(6, 0))
@@ -632,6 +638,14 @@ class RoverGUI:
             messagebox.showerror("Could not open port", str(error))
             return
         self.connect_button.config(text="Disconnect")
+
+    def open_pairing(self):
+        if self.link.is_open:
+            if not messagebox.askyesno("Disconnect first",
+                                       "Pairing needs the XBee's COM port. Disconnect now?"):
+                return
+            self.toggle_connection()
+        PairingDialog(self)
 
     def link_alive(self):
         return self.telemetry is not None and \
@@ -1308,6 +1322,217 @@ class RoverGUI:
         self.link.close()
         self._close_sample_log()
         self.root.destroy()
+
+
+class PairingDialog:
+    """Programs both XBees through the PC's USB adapter, one after the other,
+    so they share a channel and PAN ID and point at each other (xbee_setup.py)."""
+
+    STEPS = ("1.  Plug the PC XBee into the USB adapter, pick its port, press "
+             "Program PC XBee.\n"
+             "2.  Take the XBee off the rover, put it in the same adapter, press "
+             "Program rover XBee.\n"
+             "3.  Put the rover XBee back, switch the rover on, close this window and "
+             "press Connect.")
+
+    def __init__(self, gui):
+        self.gui = gui
+        self.messages = queue.Queue()
+        self.busy = False
+        self.results = {}               # role: read-back settings from this session
+        saved = self._load()
+
+        self.window = tk.Toplevel(gui.root)
+        self.window.title("Pair XBees")
+        self.window.configure(bg=SOLID_BG)
+        self.window.transient(gui.root)
+        glass.dark_title_bar(self.window)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        panel = gui._panel(self.window, "PAIR XBEES  (802.15.4 / S1, transparent mode)",
+                           fill=tk.BOTH, expand=True, padx=8, pady=8)
+        ttk.Label(panel, text=self.STEPS, style="Panel.TLabel", justify=tk.LEFT,
+                  wraplength=640).pack(anchor=tk.W, pady=(6, 8))
+
+        row = ttk.Frame(panel, style="Plain.TFrame")
+        row.pack(fill=tk.X)
+        ttk.Label(row, text="Port", style="Muted.TLabel").pack(side=tk.LEFT)
+        self.port_box = ttk.Combobox(row, state="readonly", width=34, takefocus=0)
+        self.port_box.pack(side=tk.LEFT, padx=6)
+        gui._button(row, "Refresh", self.refresh_ports).pack(side=tk.LEFT)
+
+        row = ttk.Frame(panel, style="Plain.TFrame")
+        row.pack(fill=tk.X, pady=8)
+        self.pan = self._entry(row, "PAN ID (hex)", saved.get("pan", XBEE_DEFAULT_PAN))
+        self.channel = self._entry(row, "Channel (hex)",
+                                   saved.get("channel", XBEE_DEFAULT_CHANNEL))
+        gui._button(row, "New PAN ID", self.new_pan).pack(side=tk.LEFT, padx=(6, 0))
+
+        row = ttk.Frame(panel, style="Plain.TFrame")
+        row.pack(fill=tk.X)
+        self.buttons = [
+            gui._button(row, "Program PC XBee", lambda: self.program(xb.ROLE_PC), "primary"),
+            gui._button(row, "Program rover XBee",
+                        lambda: self.program(xb.ROLE_ROVER), "primary"),
+            gui._button(row, "Read settings", self.read_settings),
+        ]
+        for button in self.buttons:
+            button.pack(side=tk.LEFT, padx=(0, 6))
+        self.status = ttk.Label(panel, text="", style="Panel.TLabel", font=GUIDE_FONT)
+        self.status.pack(anchor=tk.W, pady=(8, 4))
+        self.log_box = tk.Text(panel, height=14, width=72, bg=COLOUR_PANEL_RAISED,
+                               fg=COLOUR_TEXT, font=(READOUT_FONT[0], 10), relief=tk.FLAT,
+                               highlightthickness=1, highlightbackground=COLOUR_BORDER,
+                               state=tk.DISABLED, takefocus=0)
+        self.log_box.pack(fill=tk.BOTH, expand=True)
+
+        self.refresh_ports()
+        self._update_status()
+        self.window.after(PAIR_POLL_MS, self._poll)
+
+    def _entry(self, parent, label, value):
+        ttk.Label(parent, text=label, style="Muted.TLabel").pack(side=tk.LEFT)
+        entry = tk.Entry(parent, width=7, bg=COLOUR_PANEL_RAISED, fg=COLOUR_TEXT,
+                         insertbackground=COLOUR_TEXT, relief=tk.FLAT, font=READOUT_FONT,
+                         highlightthickness=1, highlightbackground=COLOUR_BORDER,
+                         highlightcolor=COLOUR_BLUE)
+        entry.insert(0, value)
+        entry.pack(side=tk.LEFT, padx=(6, 14))
+        # Leave out the "all" tag, so typing digits/letters here doesn't fire the
+        # main window's run hotkeys (1-4 = mode, Space = start, ...).
+        entry.bindtags((str(entry), "Entry", str(self.window)))
+        return entry
+
+    # ---- settings file ----
+    def _path(self):
+        return os.path.join(os.path.dirname(self.gui.log_path), XBEE_FILE)
+
+    def _load(self):
+        try:
+            with open(self._path(), encoding="utf-8") as saved_file:
+                return json.load(saved_file)
+        except (OSError, ValueError):
+            return {}
+
+    def _save(self, pan, channel):
+        try:
+            with open(self._path(), "w", encoding="utf-8") as saved_file:
+                json.dump({"pan": f"{pan:X}", "channel": f"{channel:X}"}, saved_file)
+        except OSError:
+            pass
+
+    # ---- actions ----
+    def refresh_ports(self):
+        ports = [f"{port.device} - {port.description}" for port in list_ports.comports()]
+        self.port_box["values"] = ports
+        if ports and self.port_box.get() not in ports:
+            main_choice = self.gui.port_box.get()
+            self.port_box.set(main_choice if main_choice in ports else ports[0])
+
+    def new_pan(self):
+        self.pan.delete(0, tk.END)
+        self.pan.insert(0, f"{xb.random_pan():X}")
+        self.results.clear()        # Any XBee programmed before now has the old PAN
+        self._log("New PAN ID: program both XBees again.")
+        self._update_status()
+
+    def _device(self):
+        selection = self.port_box.get()
+        if not selection:
+            messagebox.showwarning("No port", "Plug in the USB adapter and press Refresh.",
+                                   parent=self.window)
+            return None
+        return selection.split(" - ")[0]
+
+    def program(self, role):
+        device = self._device()
+        try:
+            pan = xb.parse_pan(self.pan.get())
+            channel = xb.parse_channel(self.channel.get())
+        except xb.XBeeError as error:
+            messagebox.showerror("Check the settings", str(error), parent=self.window)
+            return
+        if device is None:
+            return
+        self._save(pan, channel)
+        self._log(f"--- Programming {device} as the {xb.ROLE_NAMES[role]} XBee ---")
+        self._start(role, lambda: xb.program(device, role, pan, channel, log=self._log))
+
+    def read_settings(self):
+        device = self._device()
+        if device is None:
+            return
+        self._log(f"--- Reading {device} ---")
+        self._start("read", lambda: xb.read_info(device, log=self._log))
+
+    def _start(self, job, work):
+        def run():
+            try:
+                self.messages.put(("done", job, work()))
+            except xb.XBeeError as error:
+                self.messages.put(("error", job, str(error)))
+        self.busy = True
+        for button in self.buttons:
+            button.state(["disabled"])
+        threading.Thread(target=run, daemon=True).start()
+
+    # ---- UI updates (main thread) ----
+    def _log(self, text):
+        """Safe from the worker thread: lines go through the queue."""
+        self.messages.put(("log", None, text))
+
+    def _poll(self):
+        if not self.window.winfo_exists():
+            return
+        while True:
+            try:
+                kind, job, payload = self.messages.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "log":
+                self._append(payload)
+                continue
+            self.busy = False
+            for button in self.buttons:
+                button.state(["!disabled"])
+            if kind == "error":
+                self._append("FAILED: " + payload)
+            elif job == "read":
+                self._append("  " + "   ".join(f"{k}={v}" for k, v in payload.items()))
+            else:
+                self.results[job] = payload
+            self._update_status()
+        self.window.after(PAIR_POLL_MS, self._poll)
+
+    def _append(self, text):
+        self.log_box.config(state=tk.NORMAL)
+        self.log_box.insert(tk.END, text + "\n")
+        self.log_box.see(tk.END)
+        self.log_box.config(state=tk.DISABLED)
+
+    def _update_status(self):
+        pc, rover = self.results.get(xb.ROLE_PC), self.results.get(xb.ROLE_ROVER)
+        if pc and rover:
+            problems = xb.check_pair(pc, rover)
+            if problems:
+                text, colour = "Not paired: " + " ".join(problems), COLOUR_BAD
+            else:
+                text, colour = ("Paired. Put the rover XBee back, switch the rover on, "
+                                "then Connect."), COLOUR_OK
+        else:
+            done = [name for role, name in xb.ROLE_NAMES.items() if role in self.results]
+            todo = [name for role, name in xb.ROLE_NAMES.items() if role not in self.results]
+            text = (f"Done: {', '.join(done)} XBee.  " if done else "") + \
+                f"Still to program: {', '.join(todo)} XBee."
+            colour = COLOUR_WARN
+        self.status.config(text=text, foreground=colour, wraplength=640)
+
+    def close(self):
+        if self.busy:
+            messagebox.showinfo("Still working", "Wait until the XBee finishes saving.",
+                                parent=self.window)
+            return
+        self.gui.refresh_ports()
+        self.window.destroy()
 
 
 def main():

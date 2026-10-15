@@ -96,9 +96,17 @@ Recommended:
 
 Trade-off: the front position is right for Clockwise (compulsory, 6 marks), Anticlockwise and Squiggle. In Reverse the sensors trail behind the wheels, which is harder to keep stable. With only 2 sensors, **Squiggle or Anticlockwise is the safer choice for the 3-mark division**. Reverse is still implemented, so you can try it in practice.
 
-## XBee setup (XCTU)
+## XBee setup
 
-Applies to the S1 / 802.15.4 firmware in transparent (AT) mode. Other XBee models need different settings.
+**Easiest: the GUI's Pair XBees button.** It does the table below for you over the USB adapter, no XCTU needed:
+
+1. Plug the PC XBee into the USB adapter, press **Pair XBees**, pick its port, press **Program PC XBee**.
+2. Take the XBee off the rover, put it in the same adapter, press **Program rover XBee**.
+3. The window says "Paired" when both match. Put the rover XBee back and press **Connect**.
+
+It finds the XBee at any baud rate, saves to flash (ATWR), reads the values back to check them, and warns if you programmed the same XBee twice. **New PAN ID** picks a random one (then program both again). If it reports that `CH` or `MY` was refused, the XBee has ZigBee firmware: flash the 802.15.4 firmware once with XCTU, then pair in the GUI.
+
+**By hand (XCTU):** applies to the S1 / 802.15.4 firmware in transparent (AT) mode. Other XBee models need different settings.
 
 | Setting | PC XBee | Rover XBee |
 |---|---|---|
