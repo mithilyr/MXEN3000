@@ -27,7 +27,7 @@ gui/
 
 Ideas taken from [GilbertJ3072/MXEN3000](https://github.com/GilbertJ3072/MXEN3000) and rebuilt to run on the rover, not the PC:
 
-- **3 controllers, one per mode:** PID, Bang-bang or Adaptive 1/0. Press `T` in the GUI (while stopped) to switch. No re-upload needed.
+- **3 controllers, one per mode:** PID, Bang-bang or Adaptive 1/0. Press `T` in the GUI to switch, also mid-run. No re-upload needed.
 - **PID got better:** a smoothed derivative (less jitter) and an optional Ki with anti-windup (starts at 0, with a **Reset integral** button).
 - **Lap optimiser:** after each run press `Y` (clean lap) or `N` (failed), then `G` for the next settings to try. `B` loads the best settings so far. It takes small steps and counts failed runs against nearby settings, because a failed run scores 0 in the competition. Full steps are in `gui/README.md` → "Lap optimiser".
 - **Upload the firmware and rebuild the .exe together.** The tuning message changed, so an old GUI can't read the new firmware.
@@ -40,8 +40,9 @@ Why past students said "use bang-bang": their PID ran on the PC (about 100 ms la
 2. Open `firmware/rover2026/rover2026.ino` in the Arduino IDE. Pick board **Arduino Nano**, processor **ATmega328P**. Switch both levers of DIP switch **S6** off (it disconnects the XBee from D0/D1), upload, then switch S6 back on.
 3. Run `gui/build_exe.bat`, then start `gui/dist/RoverControl.exe`. Alternatively run `python rover_gui.py` from `gui/`.
 4. Pick the PC XBee's COM port and press **Connect**. The top bar turns green ("Link OK ~20 Hz").
-5. Press **C** and slide the rover slowly across the line by hand for 3 s (calibration).
-6. Pick a mode (1–4), put the rover on the line and press **Space** to start.
+5. Calibrate each IR sensor with its own pot: watch the SENSORS panel's 0-1 bars (1 = white line, 0 = black table). Hold the sensor over the white line and turn its pot until it reads above the right dashed mark (0.94), then check it reads below the left mark (0.30) over the black table. Match left and right. **Reset min/max** clears the min/max/gap columns.
+6. Press **C** and slide the rover slowly across the line by hand for 3 s (software calibration, fine-tunes the 0-1 scaling).
+7. Pick a mode (1–4), put the rover on the line and press **Space** to start.
 
 ## Keyboard (the supervisor drives with these)
 
@@ -52,7 +53,7 @@ Why past students said "use bang-bang": their PID ran on the PC (about 100 ms la
 | `Esc` | Emergency stop (always stops) |
 | `Up` / `Down` | Base speed ±5 % (works live while running) |
 | `C` | Calibrate sensors (only while stopped) |
-| `T` | Next controller for this mode: PID / Bang-bang / Adaptive (only while stopped) |
+| `T` | Next controller for this mode: PID / Bang-bang / Adaptive (also while running) |
 | `Y` / `N` | Rate the last run for the optimiser: clean lap / failed |
 | `G` / `B` | Optimiser: try next settings / use best settings (only while stopped) |
 
@@ -63,7 +64,7 @@ Each run is timed from START to STOP and appended to `run-log.csv`. The columns 
 ## How the control works
 
 - **Sensors.** Each IR reading is normalised to 0 (white) … 1 (black) using the calibrated levels. `position = right − left`. A positive value means the line has moved to the rover's left.
-- **Three controllers, chosen per mode.** The `controller` column of `MODE_TUNING` in `config.h` sets each mode's starting controller, and the GUI can switch it (key `T`, while stopped) without re-uploading. All three are compiled in. The default is PID, because the PCB gives analog voltages and the sensors are 3 cm apart over a 3 cm line.
+- **Three controllers, chosen per mode.** The `controller` column of `MODE_TUNING` in `config.h` sets each mode's starting controller, and the GUI can switch it (key `T`, also while running; the new controller starts with a cleared integral) without re-uploading. All three are compiled in. The default is PID, because the PCB gives analog voltages and the sensors are 3 cm apart over a 3 cm line.
 - **PID steering (the default).** See "Analog steering" below for what `position` means. The derivative is low-pass filtered (`D_FILTER_ALPHA` in `config.h`, about a 25 ms average), because the raw change between two readings 5 ms apart is mostly noise. `ki` starts at 0 (plain PD). Add it only if the rover holds a steady offset on the long curves. The integral is capped so that `ki x integral` alone can never ask for more than `maxTurn` (anti-windup). It resets on START, while the line is lost, and from the GUI's **Reset integral** button.
 - **Bang-bang steering.** Straight while `|position|` is below `bangLevel`, full `maxTurn` towards the line once it goes past. It has only two settings to tune, so it is quick to get working, but it zig-zags more than PID on the straights.
 - **Adaptive steering (lecture 8, "2-sensor control algorithm").** Each sensor is either on the white line or off it. Both off (or both on) means go straight. Line under one sensor means steer towards that side. The turn rate is `adaptGain / (time since the last correction)`, so a rover that has just corrected turns hard, and one that has not corrected for a while turns gently. A second correction on the same side soon after the first adds to the earlier rate. While one correction lasts, the rate also ramps up by `adaptRamp` per second. All numbers are in `config.h`.
@@ -82,7 +83,7 @@ All numbers are in `config.h` → `MODE_TUNING`. The current values are starting
 1. Bench test first (GUI "Bench test" panel, rover lifted). Set each motor to 0 V (DAC 128) and confirm the wheel is still. Send about +6 V (DAC 180) and confirm the wheel drives forwards. If it goes backwards, flip `LEFT_MOTOR_DIR` / `RIGHT_MOTOR_DIR`.
 2. Clockwise at base 30 %. Raise `kp` until the rover oscillates on the straights, then back off by a third.
 3. Raise `kd` until the oscillation on curve entry stops. If the rover still sits off-centre on the long curves, raise `ki` in steps of 5. (Bang-bang: lower `bangLevel` until it reacts early enough on the curves, then lower `maxTurn` until it stops zig-zagging. Adaptive: raise the turn gain until the rover corrects fast enough on the curves, lower it if it zig-zags on the straights.)
-4. To compare controllers, run the same mode with each one (key `T` while stopped). Each run's controller and settings go in the run log's notes column.
+4. To compare controllers, run the same mode with each one (key `T`). Each run's controller and settings go in the run log's notes column.
 5. Raise base speed with `Up` during runs. Change the gains live from the GUI's TUNING panel (see `gui/README.md`). Press **Copy for config.h** and paste the best values into `MODE_TUNING`.
 6. Repeat for the other modes. Squiggle needs higher gains. Reverse needs lower speed.
 

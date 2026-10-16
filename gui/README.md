@@ -93,7 +93,7 @@ Click once on the GUI window first, so it gets your key presses.
 | `Up` | Base speed +5% (works while the rover is running) |
 | `Down` | Base speed -5% (works while the rover is running) |
 | `C` | Calibrate the sensors |
-| `T` | Next steering controller for this mode: PID, Bang-bang, Adaptive 1/0 |
+| `T` | Next steering controller for this mode: PID, Bang-bang, Adaptive 1/0 (also while running) |
 | `Q` / `A` | Tuning value 1 up / down (PID: Kp. Bang-bang: bang level. Adaptive: turn gain) |
 | `W` / `S` | Tuning value 2 up / down (PID: Kd. Bang-bang: max turn. Adaptive: ramp) |
 | `E` / `D` | Tuning value 3 up / down (PID: Ki. Adaptive: max turn) |
@@ -103,7 +103,7 @@ Click once on the GUI window first, so it gets your key presses.
 | `G` | Optimiser: send the next settings to try |
 | `B` | Optimiser: send the best settings found so far |
 
-Keys `1` to `4`, `C`, `T`, `Y`, `N`, `G` and `B` only work while the rover is **stopped**.
+Keys `1` to `4`, `C`, `Y`, `N`, `G` and `B` only work while the rover is **stopped**.
 
 ## How to do a run
 

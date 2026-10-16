@@ -10,7 +10,8 @@ timed run is on the keyboard:
     Esc       emergency stop (always stops)
     Up/Down   change base speed
     C         calibrate sensors (sweep the rover across the line)
-    T         next steering controller for this mode (PID / bang-bang / adaptive)
+    T         next steering controller for this mode (PID / bang-bang / adaptive),
+              also while running
     Q/A W/S E/D R/F   tuning values 1-4 up / down
     Y / N     rate the last run: clean lap / failed (for the optimiser)
     G         optimiser: send the next settings to try
@@ -57,6 +58,16 @@ CHART_HEIGHT = 140             # Minimum; the chart grows to fill spare height
 ADC_FULL_SCALE = 1023
 SENSOR_SPACING_CM = 3.0          # IR sensors are 3 cm apart, over a 3 cm white line
 LAMP_SIZE = 44
+# Sensor levels for calibrating with each sensor's own pot: 0-1 of the ADC
+# range, 1 = white line, 0 = black table. The dashed marks are config.h's
+# DEFAULT_WHITE_LEVEL / DEFAULT_BLACK_LEVEL, the levels the firmware assumes
+# until C is pressed.
+DEFAULT_WHITE_LEVEL = 60
+DEFAULT_BLACK_LEVEL = 720
+LEVEL_WHITE_MARK = 1 - DEFAULT_WHITE_LEVEL / ADC_FULL_SCALE    # 0.94
+LEVEL_BLACK_MARK = 1 - DEFAULT_BLACK_LEVEL / ADC_FULL_SCALE    # 0.30
+LEVEL_BAR_WIDTH = 260
+LEVEL_BAR_HEIGHT = 18
 FONT_FAMILY = "Segoe UI"
 GUIDE_FONT = (FONT_FAMILY, 12, "bold")
 READOUT_FONT = ("Consolas", 12)
@@ -116,6 +127,11 @@ ORB_PULSE_HZ = 0.7
 
 MODE_KEYS = {"1": p.MODE_CLOCKWISE, "2": p.MODE_ANTICLOCKWISE,
              "3": p.MODE_SQUIGGLE, "4": p.MODE_REVERSE}
+
+
+def sensor_level(adc):
+    """Raw ADC reading -> 0..1, 1 = white line (the firmware reads white low)."""
+    return max(0.0, min(1.0, 1 - adc / ADC_FULL_SCALE))
 
 
 class RoverLink:
@@ -189,6 +205,9 @@ class RoverGUI:
         self.tuning = None              # Last Tuning frame from the rover
         self.tuning_target = {}         # Requested values the rover has not echoed yet
         self.tuning_sent = 0.0
+        self.controller_target = None   # Controller asked for with T, until the rover echoes it
+        self.controller_sent = 0.0
+        self.level_range = {}           # Sensor side -> (lowest, highest) level since reset
         self.widget_cache = {}          # Last options set by _set_widget
         self.calibrated = False
         self.attempts = {mode: 0 for mode in p.MODE_NAMES}
@@ -438,7 +457,7 @@ class RoverGUI:
         self.speed_label.pack(anchor=tk.W, pady=(4, 0))
         controllers = ttk.Frame(panel, style="Plain.TFrame")
         controllers.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(controllers, text="Controller [T]:", style="Muted.TLabel").pack(side=tk.LEFT,
+        ttk.Label(controllers, text="Controller [T, live]:", style="Muted.TLabel").pack(side=tk.LEFT,
                                                                              padx=(0, 8))
         for controller, name in p.CONTROLLER_NAMES.items():
             ttk.Radiobutton(controllers, text=name, value=controller,
@@ -483,7 +502,9 @@ class RoverGUI:
                                                                      fill=tk.X, padx=(4, 0))
 
     def _build_chart_panel(self, parent):
-        panel = self._panel(parent, "SENSORS", fill=tk.BOTH, expand=True)
+        panel = self._panel(parent, "SENSORS  (level 0-1: 1 = white line, 0 = black table)",
+                            fill=tk.BOTH, expand=True)
+        self._button(panel.header, "Reset min/max", self.level_range.clear).pack(side=tk.RIGHT)
         lamps = ttk.Frame(panel, style="Plain.TFrame")
         lamps.pack(anchor=tk.W, pady=(4, 0))
         self.lamps = {}
@@ -497,6 +518,7 @@ class RoverGUI:
                              font=(FONT_FAMILY, 12, "bold"), width=14)
             text.pack(side=tk.LEFT, padx=(4, 16))
             self.lamps[side] = (canvas, oval, text)
+        self._build_level_bars(panel)
         self.readout_label = ttk.Label(panel, text="", style="Panel.TLabel", font=READOUT_FONT)
         self.readout_label.pack(anchor=tk.W, pady=(4, 4))
         self.chart_canvas = tk.Canvas(panel, width=CHART_WIDTH, height=CHART_HEIGHT,
@@ -508,6 +530,35 @@ class RoverGUI:
                              ("Position (centre = 0)", COLOUR_POSITION)):
             ttk.Label(legend, text=f"■ {text}", foreground=colour,
                       style="Panel.TLabel").pack(side=tk.LEFT, padx=(0, 12))
+
+    def _build_level_bars(self, panel):
+        """One bar per sensor for turning its pot: live level, and the lowest and
+        highest level seen since Reset min/max."""
+        levels = ttk.Frame(panel, style="Plain.TFrame")
+        levels.pack(anchor=tk.W, pady=(6, 0))
+        self.level_widgets = {}
+        for row, (side, colour) in enumerate((("Left", COLOUR_IR_LEFT), ("Right", COLOUR_IR_RIGHT))):
+            ttk.Label(levels, text=side, width=6, style="Panel.TLabel").grid(row=row, column=0,
+                                                                            sticky=tk.W)
+            bar = tk.Canvas(levels, width=LEVEL_BAR_WIDTH, height=LEVEL_BAR_HEIGHT,
+                            bg=COLOUR_CHART_BG, highlightthickness=0)
+            bar.grid(row=row, column=1, pady=2)
+            fill = bar.create_rectangle(0, 0, 0, LEVEL_BAR_HEIGHT, fill=colour, outline="")
+            for mark in (LEVEL_BLACK_MARK, LEVEL_WHITE_MARK):
+                x = mark * LEVEL_BAR_WIDTH
+                bar.create_line(x, 0, x, LEVEL_BAR_HEIGHT, fill=COLOUR_TEXT, dash=(2, 2))
+            value = ttk.Label(levels, text="--", style="Panel.TLabel", width=5,
+                              font=("Consolas", 14, "bold"))
+            value.grid(row=row, column=2, padx=8)
+            seen = ttk.Label(levels, text="", style="Muted.TLabel", font=READOUT_FONT)
+            seen.grid(row=row, column=3, sticky=tk.W)
+            self.level_widgets[side] = (bar, fill, value, seen)
+        ttk.Label(panel, style="Muted.TLabel", wraplength=640, justify=tk.LEFT,
+                  text=(f"Pot calibration: turn each sensor's pot until it reads above "
+                        f"{LEVEL_WHITE_MARK:.2f} over the white line and below "
+                        f"{LEVEL_BLACK_MARK:.2f} over the black table (dashed marks), with left "
+                        f"and right matching. Green = clear reading, orange = in between.")
+                  ).pack(anchor=tk.W, pady=(2, 0))
 
     def _build_tuning_panel(self, parent):
         panel = self._panel(parent, "TUNING  (live - changes the rover immediately, current mode)",
@@ -635,6 +686,7 @@ class RoverGUI:
         except serial.SerialException as error:
             messagebox.showerror("Could not open port", str(error))
             return
+        self.level_range.clear()
         self.connect_button.config(text="Disconnect")
 
     def open_pairing(self):
@@ -685,12 +737,16 @@ class RoverGUI:
         self.link.send(p.CMD_SET_MODE, mode)
 
     def select_controller(self, controller):
-        """Steering controller for the current mode (the rover ignores it while running)."""
-        if self.rover_running() or self.tuning is None:
+        """Steering controller for the current mode, also while running."""
+        if not self.link_alive() or self.tuning is None:
             self.selected_controller.set(self._controller())
+            self.tuning_status.config(text="T needs the rover link - connect first")
             return
-        self.selected_controller.set(controller)
-        self.link.send(p.CMD_SET_CONTROLLER, controller)
+        if self.link.send(p.CMD_SET_CONTROLLER, controller):
+            self.controller_target = controller
+            self.controller_sent = time.monotonic()
+            self.tuning_status.config(text=f"Controller: {p.CONTROLLER_NAMES[controller]}")
+        self.selected_controller.set(self._controller())
 
     def cycle_controller(self):
         self.select_controller((self._controller() + 1) % len(p.CONTROLLER_NAMES))
@@ -1008,6 +1064,7 @@ class RoverGUI:
         self._update_link_label()
         self._update_run_labels()
         self._update_lamps()
+        self._update_levels()
         self._update_guide()
         self._update_tuning_panel()
         self._update_optimiser_panel()
@@ -1073,10 +1130,11 @@ class RoverGUI:
         self.speed_label.config(text=f"Base speed: {t.speed} %")
         if not t.running and self.selected_mode.get() != t.mode:
             self.selected_mode.set(t.mode)
-        if self.tuning is not None and self.selected_controller.get() != self.tuning.controller:
-            self.selected_controller.set(self.tuning.controller)
+        if self.tuning is not None and self.selected_controller.get() != self._controller():
+            self.selected_controller.set(self._controller())
         self.readout_label.config(
-            text=f"IR L {t.ir_left:4d} ({int(t.left_white)})  IR R {t.ir_right:4d} ({int(t.right_white)})  "
+            text=f"IR L {sensor_level(t.ir_left):.2f} ({int(t.left_white)})  "
+                 f"IR R {sensor_level(t.ir_right):.2f} ({int(t.right_white)})  "
                  f"pos {t.position:+.2f} (~{t.position * SENSOR_SPACING_CM / 2:+.1f} cm)  "
                  f"DAC {t.dac_left:3d}/{t.dac_right:3d} "
                  f"({p.dac_to_volts(t.dac_left):+.1f}/{p.dac_to_volts(t.dac_right):+.1f} V, "
@@ -1086,7 +1144,12 @@ class RoverGUI:
     # Live tuning
     # ================================================================
     def _controller(self):
-        return p.CONTROLLER_PID if self.tuning is None else self.tuning.controller
+        """The controller in use, or the one just asked for with T until the rover echoes it."""
+        if self.tuning is None:
+            return p.CONTROLLER_PID
+        if self.controller_target is not None:
+            return self.controller_target
+        return self.tuning.controller
 
     def _active_slots(self):
         return TUNING_SLOTS.get(self._controller(), ())
@@ -1124,6 +1187,10 @@ class RoverGUI:
         self.tuning = tuning
         if mode_changed or time.monotonic() - self.tuning_sent > TUNING_CONFIRM_S:
             self.tuning_target.clear()
+        # Echoed, or not taken within the confirm time (old firmware refuses while running).
+        if mode_changed or tuning.controller == self.controller_target or \
+                time.monotonic() - self.controller_sent > TUNING_CONFIRM_S:
+            self.controller_target = None
 
     def _tuning_note(self):
         """The tuning in use, written into the run log's notes column."""
@@ -1265,6 +1332,24 @@ class RoverGUI:
                 colour, label = COLOUR_LAMP_DARK, f"{side}: 0 ground"      # Dark: sees the black table
             canvas.itemconfig(oval, fill=colour)
             text.config(text=label)
+
+    def _update_levels(self):
+        t = self.telemetry if self.link_alive() else None
+        for side in ("Left", "Right"):
+            bar, fill, value, seen = self.level_widgets[side]
+            if t is None:
+                bar.coords(fill, 0, 0, 0, LEVEL_BAR_HEIGHT)
+                self._set_widget(value, text="--", foreground=COLOUR_MUTED)
+                continue
+            level = sensor_level(t.ir_left if side == "Left" else t.ir_right)
+            low, high = self.level_range.get(side, (level, level))
+            low, high = min(low, level), max(high, level)
+            self.level_range[side] = (low, high)
+            bar.coords(fill, 0, 0, level * LEVEL_BAR_WIDTH, LEVEL_BAR_HEIGHT)
+            clear = level >= LEVEL_WHITE_MARK or level <= LEVEL_BLACK_MARK
+            self._set_widget(value, text=f"{level:.2f}",
+                             foreground=COLOUR_OK if clear else COLOUR_WARN)
+            self._set_widget(seen, text=f"min {low:.2f}  max {high:.2f}  gap {high - low:.2f}")
 
     def _guidance(self):
         if not self.link.is_open:

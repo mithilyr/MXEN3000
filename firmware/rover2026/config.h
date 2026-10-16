@@ -65,7 +65,7 @@ constexpr int ADC_MAX = 1023;               // 10-bit ADC full scale
 //   |e| > 3 cm     the line has left both sensors (both black), so it is lost
 // That is what the analog PID and bang-bang controllers want.
 // Each mode picks its controller in MODE_TUNING below, and the GUI can change
-// it while the rover is stopped (see the Controller enum in protocol.h):
+// it at any time with T (see the Controller enum in protocol.h):
 //   CONTROLLER_PID       PID on the difference of the two analog readings.
 //   CONTROLLER_BANG_BANG Straight inside +-bangLevel, full maxTurn outside it.
 //   CONTROLLER_ADAPTIVE  Lecture 8 "time since last correction" controller on
@@ -129,7 +129,7 @@ constexpr int TURN_ANTICLOCKWISE = -1;
 struct ModeTuning {
   int travelDir;        // +1 forwards, -1 backwards
   int defaultTurn;      // Search direction before the line has been seen off-centre
-  byte controller;      // Controller enum (protocol.h), changeable from the GUI while stopped
+  byte controller;      // Controller enum (protocol.h), changeable from the GUI with T
   int baseSpeed;        // % of DAC_SPAN, changeable live from the GUI
   int searchSpeed;      // % of DAC_SPAN while spinning to find a lost line
   float kp;             // PID: % turn per unit of position error

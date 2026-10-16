@@ -43,7 +43,7 @@ constexpr byte CMD_SET_KP = 0x0C;         // data = analog kp
 constexpr byte CMD_SET_KD = 0x0D;         // data = analog kd x KD_SCALE
 constexpr byte CMD_SET_KI = 0x0E;         // data = analog ki
 constexpr byte CMD_SET_BANG_LEVEL = 0x0F; // data = bang-bang level x BANG_LEVEL_SCALE
-constexpr byte CMD_SET_CONTROLLER = 0x10; // data = Controller (only while stopped)
+constexpr byte CMD_SET_CONTROLLER = 0x10; // data = Controller (also while running)
 constexpr byte CMD_RESET_INTEGRAL = 0x11; // Clear the PID integral, data ignored
 constexpr float GAIN_SCALE = 10.0f;
 constexpr float KD_SCALE = 10.0f;

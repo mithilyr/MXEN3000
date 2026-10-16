@@ -9,7 +9,7 @@
 // front, both over the line when the rover is centred. The difference
 // between them gives the position error. Each mode steers with one of three
 // controllers (PID, bang-bang or the lecture 8 adaptive one), chosen in
-// config.h or from the GUI while stopped. If both sensors see black, the
+// config.h or from the GUI (key T, also while running). If both sensors see black, the
 // rover spins towards the side it last saw the line on, and stops if it
 // cannot find it again.
 //
@@ -189,9 +189,16 @@ void setMode(byte newMode) {
   baseSpeed = liveTuning[mode].baseSpeed;
 }
 
+// Allowed while running too, so the GUI's T key always works. The new
+// controller starts from a clean state, not the old one's memory.
 void setController(byte newController) {
-  if (running || newController >= CONTROLLER_COUNT) return;
+  if (newController >= CONTROLLER_COUNT) return;
   liveTuning[mode].controller = newController;
+  integral = 0.0f;
+  filteredDerivative = 0.0f;
+  correcting = false;
+  lastCorrectionEndMs = millis();
+  correctionRate = 0.0f;
 }
 
 // ============================================================
