@@ -45,6 +45,7 @@ constexpr byte CMD_SET_KI = 0x0E;         // data = analog ki
 constexpr byte CMD_SET_BANG_LEVEL = 0x0F; // data = bang-bang level x BANG_LEVEL_SCALE
 constexpr byte CMD_SET_CONTROLLER = 0x10; // data = Controller (also while running)
 constexpr byte CMD_RESET_INTEGRAL = 0x11; // Clear the PID integral, data ignored
+constexpr byte CMD_SET_SENSOR_TEST = 0x12; // data = 1: motors stay off but the controller runs and reports its PWM; 0: off (stopped only)
 constexpr float GAIN_SCALE = 10.0f;
 constexpr float KD_SCALE = 10.0f;
 constexpr float BANG_LEVEL_SCALE = 100.0f;
@@ -62,6 +63,7 @@ constexpr byte STATUS_RUNNING = 0x01;
 constexpr byte STATUS_LINE_LOST = 0x02;
 constexpr byte STATUS_CALIBRATING = 0x04;
 constexpr byte STATUS_LINK_FAILSAFE = 0x08;
+constexpr byte STATUS_SENSOR_TEST = 0x80;  // Bit 7, above the mode bits
 constexpr byte STATUS_MODE_SHIFT = 4;     // Mode lives in bits 4-6
 
 // Sensors byte bit layout: 1 = sensor is over the white line, 0 = over black

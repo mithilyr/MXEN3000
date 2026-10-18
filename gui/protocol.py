@@ -36,6 +36,7 @@ CMD_SET_KI = 0x0E
 CMD_SET_BANG_LEVEL = 0x0F
 CMD_SET_CONTROLLER = 0x10   # Also while running
 CMD_RESET_INTEGRAL = 0x11
+CMD_SET_SENSOR_TEST = 0x12  # 1: motors stay off, rover reports the PWM it would drive
 GAIN_SCALE = 10.0
 KD_SCALE = 10.0
 BANG_LEVEL_SCALE = 100.0
@@ -51,6 +52,7 @@ STATUS_RUNNING = 0x01
 STATUS_LINE_LOST = 0x02
 STATUS_CALIBRATING = 0x04
 STATUS_LINK_FAILSAFE = 0x08
+STATUS_SENSOR_TEST = 0x80
 STATUS_MODE_SHIFT = 4
 STATUS_MODE_MASK = 0x07
 
@@ -136,6 +138,7 @@ class Telemetry:
     mode: int
     left_white: bool = False    # Steady 1/0 from the rover: True = on the white line
     right_white: bool = False
+    sensor_test: bool = False   # Motors held off, dac_* is what the controller would drive
 
 
 def decode_telemetry(frame):
@@ -154,6 +157,7 @@ def decode_telemetry(frame):
         mode=(status >> STATUS_MODE_SHIFT) & STATUS_MODE_MASK,
         left_white=bool(frame[9] & SENSOR_LEFT_WHITE),
         right_white=bool(frame[9] & SENSOR_RIGHT_WHITE),
+        sensor_test=bool(status & STATUS_SENSOR_TEST),
     )
 
 

@@ -38,6 +38,8 @@ bool running = false;
 bool lineLost = false;
 bool linkFailsafe = false;
 bool calibrating = false;
+bool sensorTest = false;     // Controller runs, motors stay off (GUI bench test)
+bool driveSuppressed = false;  // Set only while the sensor test runs the controller
 
 // ---- Sensor state ----
 int rawLevel[SENSOR_COUNT] = {0, 0};
@@ -66,12 +68,23 @@ float correctionRate = 0.0f;                // C: turn rate of the last correcti
 // ---- Outputs ----
 byte dacLeft = DAC_NEUTRAL;
 byte dacRight = DAC_NEUTRAL;
+int8_t lastLeftPercent = 0;                 // Last wheel commands, -100..100 %
+int8_t lastRightPercent = 0;
+
+// ---- Backtrack history: ring buffer of recent wheel commands ----
+int8_t historyLeft[BACKTRACK_SAMPLES];
+int8_t historyRight[BACKTRACK_SAMPLES];
+byte historyHead = 0;                       // Next slot to write
+byte historyCount = 0;
+unsigned long lastHistoryMs = 0;
+unsigned long nextBacktrackMs = 0;
 
 // ---- Timers ----
 unsigned long lastPacketMs = 0;
 unsigned long lastControlMs = 0;
 unsigned long lastTelemetryMs = 0;
 unsigned long lastTuningMs = 0;
+bool tuningDirty = false;  // A tuning command arrived: echo the values at once
 unsigned long lostSinceMs = 0;
 unsigned long calibrationStartMs = 0;
 
@@ -91,8 +104,11 @@ byte speedToDac(int speedPercent, int motorDir) {
 
 // Speeds are -100..100 % of full speed, positive = forwards for that wheel.
 void setWheelSpeeds(int leftPercent, int rightPercent) {
+  lastLeftPercent = constrain(leftPercent, -SPEED_MAX, SPEED_MAX);
+  lastRightPercent = constrain(rightPercent, -SPEED_MAX, SPEED_MAX);
   dacLeft = speedToDac(leftPercent, LEFT_MOTOR_DIR);
   dacRight = speedToDac(rightPercent, RIGHT_MOTOR_DIR);
+  if (driveSuppressed) return;  // Sensor test: report the values, leave the pins alone
   writeDac(DAC_LEFT_PINS, dacLeft);
   writeDac(DAC_RIGHT_PINS, dacRight);
 }
@@ -135,6 +151,8 @@ void updateSensors() {
 // ============================================================
 void startCalibration() {
   if (running) return;
+  sensorTest = false;
+  holdNeutral();
   calibrating = true;
   calibrationStartMs = millis();
   for (byte s = 0; s < SENSOR_COUNT; s++) {
@@ -163,9 +181,16 @@ void updateCalibration(unsigned long now) {
 // ============================================================
 // Run control
 // ============================================================
+void clearHistory() {
+  historyHead = 0;
+  historyCount = 0;
+}
+
 void startRun() {
   if (calibrating) return;
+  sensorTest = false;
   running = true;
+  clearHistory();
   lineLost = false;
   linkFailsafe = false;
   lastTurn = liveTuning[mode].defaultTurn;
@@ -180,6 +205,23 @@ void startRun() {
 
 void stopRun() {
   running = false;
+  holdNeutral();
+}
+
+// Sensor test: the controller runs on the live sensors but the motors stay
+// at neutral, so hovering the sensors over black and white shows the PWM the
+// rover would drive. Only while stopped.
+void setSensorTest(bool on) {
+  if (running || calibrating) return;
+  sensorTest = on;
+  lineLost = false;
+  clearHistory();
+  integral = 0.0f;
+  filteredDerivative = 0.0f;
+  correcting = false;
+  lastCorrectionEndMs = millis();
+  correctionRate = 0.0f;
+  lastTurn = liveTuning[mode].defaultTurn;
   holdNeutral();
 }
 
@@ -204,9 +246,10 @@ void setController(byte newController) {
 // ============================================================
 // Line follower (spin search when lost, then one of three controllers)
 // ============================================================
-// While lineMissing, spins towards the side the line was last seen on and
-// stops the run if that takes longer than LOST_TIMEOUT_MS. Returns true
-// when it is handling a lost line, so the caller must not steer.
+// While lineMissing, first retraces the last wheel commands in reverse, then
+// spins towards the side the line was last seen on, and stops the run if
+// that takes longer than LOST_TIMEOUT_MS. Returns true when it is handling a
+// lost line, so the caller must not steer.
 bool searchIfLineLost(bool lineMissing, unsigned long now, const ModeTuning& tuning) {
   if (!lineMissing) {
     lineLost = false;
@@ -215,9 +258,20 @@ bool searchIfLineLost(bool lineMissing, unsigned long now, const ModeTuning& tun
   if (!lineLost) {
     lineLost = true;
     lostSinceMs = now;
+    nextBacktrackMs = now;
   }
   if (now - lostSinceMs > LOST_TIMEOUT_MS) {
     stopRun();
+    return true;
+  }
+  if (historyCount > 0) {
+    // Backtrack: undo the newest recorded command, one sample at a time.
+    if (now >= nextBacktrackMs) {
+      nextBacktrackMs = now + BACKTRACK_SAMPLE_MS;
+      historyHead = (historyHead + BACKTRACK_SAMPLES - 1) % BACKTRACK_SAMPLES;
+      historyCount--;
+      setWheelSpeeds(-historyLeft[historyHead], -historyRight[historyHead]);
+    }
     return true;
   }
   int spin = lastTurn * tuning.searchSpeed;
@@ -343,6 +397,16 @@ void updateBangBang(unsigned long now) {
   driveWithTurn(tuning, tuning.steerSign * turn);
 }
 
+// Remembers the wheel commands given while the line is being followed.
+void recordHistory(unsigned long now) {
+  if (now - lastHistoryMs < BACKTRACK_SAMPLE_MS) return;
+  lastHistoryMs = now;
+  historyLeft[historyHead] = lastLeftPercent;
+  historyRight[historyHead] = lastRightPercent;
+  historyHead = (historyHead + 1) % BACKTRACK_SAMPLES;
+  if (historyCount < BACKTRACK_SAMPLES) historyCount++;
+}
+
 void updateLineFollower(unsigned long now) {
   switch (liveTuning[mode].controller) {
     case CONTROLLER_BANG_BANG:
@@ -355,6 +419,7 @@ void updateLineFollower(unsigned long now) {
       updatePid(now);
       break;
   }
+  if ((running || sensorTest) && !lineLost) recordHistory(now);
 }
 
 // ============================================================
@@ -365,7 +430,7 @@ byte dacFromData(byte data) {
 }
 
 void handleCommand(byte command, byte data) {
-  bool benchTestAllowed = !running && !calibrating;
+  bool benchTestAllowed = !running && !calibrating && !sensorTest;
   switch (command) {
     case CMD_PING:
       break;
@@ -409,6 +474,9 @@ void handleCommand(byte command, byte data) {
     case CMD_RESET_INTEGRAL:
       integral = 0.0f;
       break;
+    case CMD_SET_SENSOR_TEST:
+      setSensorTest(data != 0);
+      break;
     case CMD_CALIBRATE:
       startCalibration();
       break;
@@ -449,6 +517,11 @@ void pollLink() {
     if (checksum == frame[checksumIndex]) {
       lastPacketMs = millis();
       handleCommand(frame[1], frame[2]);
+      byte command = frame[1];
+      if (command == CMD_SET_MODE || command == CMD_SET_SPEED ||
+          (command >= CMD_SET_ADAPT_GAIN && command <= CMD_SET_CONTROLLER)) {
+        tuningDirty = true;
+      }
     }
   }
 }
@@ -474,6 +547,7 @@ void sendTelemetry() {
   if (lineLost) status |= STATUS_LINE_LOST;
   if (calibrating) status |= STATUS_CALIBRATING;
   if (linkFailsafe) status |= STATUS_LINK_FAILSAFE;
+  if (sensorTest) status |= STATUS_SENSOR_TEST;
 
   byte frame[TELEMETRY_FRAME_LENGTH] = {
     FRAME_START,
@@ -562,6 +636,10 @@ void loop() {
       updateCalibration(now);
     } else if (running) {
       updateLineFollower(now);
+    } else if (sensorTest) {
+      driveSuppressed = true;
+      updateLineFollower(now);
+      driveSuppressed = false;
     }
   }
 
@@ -570,7 +648,8 @@ void loop() {
     sendTelemetry();
   }
 
-  if (now - lastTuningMs >= TUNING_PERIOD_MS) {
+  if (tuningDirty || now - lastTuningMs >= TUNING_PERIOD_MS) {
+    tuningDirty = false;
     lastTuningMs = now;
     sendTuning();
   }

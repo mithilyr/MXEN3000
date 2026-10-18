@@ -20,10 +20,14 @@ constexpr byte SOFT_SERIAL_RX_PIN = 12;     // Wire to XBee DOUT
 constexpr byte SOFT_SERIAL_TX_PIN = 13;     // Wire to XBee DIN
 
 // Stop the motors if no valid packet arrives for this long (the GUI
-// sends a heartbeat every 100 ms).
-constexpr unsigned long LINK_TIMEOUT_MS = 600;
-constexpr unsigned long TELEMETRY_PERIOD_MS = 50;
-constexpr unsigned long TUNING_PERIOD_MS = 250;    // How often the values in use are sent back
+// sends a heartbeat every 200 ms).
+constexpr unsigned long LINK_TIMEOUT_MS = 1200;
+// Fewer, larger gaps between frames: each frame is one radio packet, and the
+// Zigbee link handles a few dozen a second at best. 10 Hz is plenty for the GUI.
+constexpr unsigned long TELEMETRY_PERIOD_MS = 100;
+// The tuning echo is also sent straight after any tuning command, so this is
+// only a slow refresh in case a frame was lost.
+constexpr unsigned long TUNING_PERIOD_MS = 1000;
 
 // ---- Status LED (built-in, D13) ----
 constexpr byte STATUS_LED_PIN = LED_BUILTIN;
@@ -117,8 +121,15 @@ constexpr float D_FILTER_ALPHA = 0.2f;
 constexpr float MIN_CORRECTION_GAP_S = 0.02f;  // Floor on that time, avoids a divide-by-zero spike
 constexpr float CORRECTION_MEMORY_S = 1.0f;    // Older corrections are forgotten
 constexpr int MIN_CORRECTION_TURN = 15;        // Shallowest turn, % of DAC_SPAN
-// Spin in place towards the last-seen side for at most this long, then stop.
+// Total time allowed to find the line again (backtrack, then spin towards the
+// last-seen side), then the run stops.
 constexpr unsigned long LOST_TIMEOUT_MS = 1500;
+
+// Backtracking: when the line is lost the rover first replays its last wheel
+// commands in reverse (newest first) to retrace its path, then falls back to
+// the spin search. History = BACKTRACK_SAMPLES x BACKTRACK_SAMPLE_MS (0.6 s).
+constexpr unsigned long BACKTRACK_SAMPLE_MS = 20;
+constexpr byte BACKTRACK_SAMPLES = 30;
 
 constexpr int SPEED_MAX = 100;              // Speeds are % of DAC_SPAN
 

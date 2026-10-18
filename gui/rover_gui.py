@@ -42,8 +42,8 @@ import xbee_setup as xb
 
 # ---- Link ----
 BAUD_RATE = xb.LINK_BAUD       # 38400 (Pairing Guide step 15) = LINK_BAUD in config.h
-HEARTBEAT_MS = 100              # Rover failsafe is LINK_TIMEOUT_MS = 600
-TELEMETRY_STALE_S = 0.5         # No telemetry for this long = link down
+HEARTBEAT_MS = 200              # Rover failsafe is LINK_TIMEOUT_MS = 1200
+TELEMETRY_STALE_S = 1.2         # No telemetry for this long = link down
 READ_CHUNK_BYTES = 256
 READ_IDLE_S = 0.005
 
@@ -495,6 +495,14 @@ class RoverGUI:
         ttk.Checkbutton(panel.header, text="Same voltage on both", variable=self.bench_linked,
                         style="Panel.TCheckbutton", takefocus=0,
                         command=lambda: self._bench_changed(p.CMD_SET_DAC_LEFT)).pack(side=tk.RIGHT)
+        self.sensor_test_var = tk.BooleanVar(value=False)
+        self.sensor_test_sent = 0.0
+        ttk.Checkbutton(panel, text="Sensor test: motors stay off, show the PWM the sensors would give",
+                        variable=self.sensor_test_var, style="Panel.TCheckbutton", takefocus=0,
+                        command=self.toggle_sensor_test).pack(anchor=tk.W, pady=(6, 0))
+        self.live_pwm_label = ttk.Label(panel, text="Live PWM: no telemetry", style="Panel.TLabel",
+                                        justify=tk.LEFT)
+        self.live_pwm_label.pack(anchor=tk.W, pady=(2, 0))
         buttons = ttk.Frame(panel, style="Plain.TFrame")
         buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
         self._button(buttons, "Send both", self.send_bench_both).pack(side=tk.LEFT, expand=True, fill=tk.X)
@@ -786,6 +794,24 @@ class RoverGUI:
         volts = self._bench_volts(command) + step
         volts = max(-p.MOTOR_VOLTS_MAX, min(p.MOTOR_VOLTS_MAX, volts))
         self.bench_vars[command].set(round(volts, 1))
+
+    def toggle_sensor_test(self):
+        on = self.sensor_test_var.get()
+        self.sensor_test_sent = time.monotonic()
+        if not self.link.send(p.CMD_SET_SENSOR_TEST, int(on)):
+            self.sensor_test_var.set(False)
+
+    def _update_live_pwm(self, t):
+        # Follow the rover: START or a calibration switches the test off.
+        if (t.sensor_test != self.sensor_test_var.get() and
+                time.monotonic() - self.sensor_test_sent > TUNING_CONFIRM_S):
+            self.sensor_test_var.set(t.sensor_test)
+        lines = []
+        for name, dac, white in (("Left ", t.dac_left, t.left_white), ("Right", t.dac_right, t.right_white)):
+            lines.append(f"{name}  sensor {'WHITE' if white else 'black'}   "
+                         f"PWM {p.dac_to_percent(dac):5.1f} %   "
+                         f"({p.dac_to_volts(dac):+.1f} V, DAC {dac:3d})")
+        self.live_pwm_label.config(text="\n".join(lines))
 
     def send_bench(self, command):
         if not self.rover_running():
@@ -1115,6 +1141,8 @@ class RoverGUI:
             return
         if t.calibrating:
             state, colour = "CALIBRATING", COLOUR_WARN
+        elif t.sensor_test:
+            state, colour = "SENSOR TEST", COLOUR_WARN
         elif t.running:
             state, colour = "RUNNING", COLOUR_OK
         else:
@@ -1128,6 +1156,7 @@ class RoverGUI:
             flags.append("LINK FAILSAFE TRIPPED")
         self.detail_label.config(text="   ".join(flags))
         self.speed_label.config(text=f"Base speed: {t.speed} %")
+        self._update_live_pwm(t)
         if not t.running and self.selected_mode.get() != t.mode:
             self.selected_mode.set(t.mode)
         if self.tuning is not None and self.selected_controller.get() != self._controller():

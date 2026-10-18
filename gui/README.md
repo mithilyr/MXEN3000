@@ -76,7 +76,7 @@ The orange line in the window always says which XBee to put on the shield next. 
 |---|---|
 | Red "Disconnected" | Not connected yet. Click Connect. |
 | Orange "Port open, no telemetry" | The port is open but the rover is not answering. Check the rover is on and both XBees have the same settings. |
-| Green "Link OK ... Hz" | Working. You should see about 20 Hz and 0 checksum errors. |
+| Green "Link OK ... Hz" | Working. You should see about 10 Hz and 0 checksum errors. |
 
 ## Keyboard controls
 
