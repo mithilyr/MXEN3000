@@ -10,7 +10,7 @@ This is a clean rewrite. It keeps only the ideas from `../arduino/line_follower`
 
 ```
 firmware/rover2026/
-  rover2026.ino   main loop, line follower, XBee link, failsafe
+  rover2026.ino   main loop, line follower, XBee link
   config.h        pins, XBee options, per-mode tuning table  <- tune here
   protocol.h      frame format + command numbers (mirrors gui/protocol.py)
 gui/
@@ -71,10 +71,11 @@ Each run is timed from START to STOP and appended to `run-log.csv`. The columns 
 - **Analog steering (PID and bang-bang).** The controller turns `position` into a steering term, which is added to one wheel and subtracted from the other around the base speed. It runs every 5 ms. With the sensors 3 cm apart over the 3 cm line, a centred rover has each sensor on one edge of the line. Sliding sideways by less than 1.5 cm changes `position` smoothly (`position` = +-1 at +-1.5 cm). Between 1.5 and 3 cm one sensor is fully on the line and the other fully off, so `position` stays at +-1. Beyond 3 cm the line has left both sensors and is treated as lost. The GUI shows the approximate offset in cm next to `pos`.
 - **Sensor geometry.** `SENSORS_STRADDLE_LINE` (adaptive controller only). `true` = the sensors sit either side of the line, as in lecture 8, so both off means straight and a lost line cannot be detected. `false` = both sensors sit over the line, so both off means the line is lost.
 - **Sensor polarity.** `WHITE_READS_HIGH` in `config.h`. The sensor board has a 10k pull-up on each sensor output, so a sensor over the white line (lots of reflected light) reads LOW and black reads HIGH. That is the default (`false`). Set it to `true` only if a sensor over the line reads HIGH in the GUI's IR numbers.
-- **Lost line.** When the line is lost (PID and bang-bang: both sensors on black; adaptive with `SENSORS_STRADDLE_LINE false`: both off the line), the rover first backtracks: it replays its last 0.6 s of wheel commands in reverse to retrace its path (`BACKTRACK_SAMPLES` / `BACKTRACK_SAMPLE_MS` in `config.h`), stopping as soon as a sensor sees the line. If the history runs out, it spins in place towards the side it last saw the line on (at the very start of a run, with no history, towards the mode's track direction). If it still can't find the line after 1.5 s in total, it stops.
+- **PWM test window (GUI button "PWM test").** Sets the Bang-bang controller's four wheel levels for the current mode as electrical PWM duty (100 % = full forward, 50 % = stopped, 0 % = full reverse), in 5 % steps: left and right with the line centred, and left and right while slowed to turn. Changes apply live, also while running, are saved per mode in `pwm_levels.json` next to the run log, and are re-sent after a connect or mode change. Defaults are the `pwm*` columns of `MODE_TUNING`. PID and Adaptive ignore them.
+- **Lost line.** Bang-bang has no lost-line search: with both sensors black it keeps its last wheel command until a sensor sees the line. For the others: when the line is lost (PID: both sensors on black; adaptive with `SENSORS_STRADDLE_LINE false`: both off the line), the rover first backtracks: it replays its last 0.6 s of wheel commands in reverse to retrace its path (`BACKTRACK_SAMPLES` / `BACKTRACK_SAMPLE_MS` in `config.h`), stopping as soon as a sensor sees the line. If the history runs out, it spins in place towards the side it last saw the line on (at the very start of a run, with no history, towards the mode's track direction). It keeps spinning until it finds the line or you send STOP; there is no lost-line timeout.
 - **Reverse.** Same controller, but the base speed is negative. The sensors stay at the front (now the trailing end), so this mode runs slower with more damping. `steerSign` in `config.h` flips the steering if testing shows it correcting the wrong way.
-- **Link failsafe.** The GUI sends a heartbeat every 200 ms. If the rover hears nothing valid for 1.2 s, it stops and the built-in LED blinks fast. This keeps the rover from driving off the table if the radio drops.
-- **Status LED (D13).** Solid = running. Fast blink = failsafe tripped. Off = stopped.
+- **No link failsafe.** Once started, the rover keeps running through radio dropouts until it receives a STOP command or loses the line. Reconnect and press Esc/Space to stop it.
+- **Status LED (D13).** Solid = running. Off = stopped.
 
 ## Tuning order (about 30 minutes per mode)
 

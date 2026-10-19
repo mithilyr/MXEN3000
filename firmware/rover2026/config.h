@@ -19,9 +19,6 @@ constexpr unsigned long LINK_BAUD = 38400;  // BD = 5, per the XBee Pairing Guid
 constexpr byte SOFT_SERIAL_RX_PIN = 12;     // Wire to XBee DOUT
 constexpr byte SOFT_SERIAL_TX_PIN = 13;     // Wire to XBee DIN
 
-// Stop the motors if no valid packet arrives for this long (the GUI
-// sends a heartbeat every 200 ms).
-constexpr unsigned long LINK_TIMEOUT_MS = 1200;
 // Fewer, larger gaps between frames: each frame is one radio packet, and the
 // Zigbee link handles a few dozen a second at best. 10 Hz is plenty for the GUI.
 constexpr unsigned long TELEMETRY_PERIOD_MS = 100;
@@ -31,7 +28,6 @@ constexpr unsigned long TUNING_PERIOD_MS = 1000;
 
 // ---- Status LED (built-in, D13) ----
 constexpr byte STATUS_LED_PIN = LED_BUILTIN;
-constexpr unsigned long FAILSAFE_BLINK_MS = 100;
 
 // ---- R-2R DACs (LSB first) ----
 constexpr byte DAC_BITS = 8;
@@ -121,9 +117,6 @@ constexpr float D_FILTER_ALPHA = 0.2f;
 constexpr float MIN_CORRECTION_GAP_S = 0.02f;  // Floor on that time, avoids a divide-by-zero spike
 constexpr float CORRECTION_MEMORY_S = 1.0f;    // Older corrections are forgotten
 constexpr int MIN_CORRECTION_TURN = 15;        // Shallowest turn, % of DAC_SPAN
-// Total time allowed to find the line again (backtrack, then spin towards the
-// last-seen side), then the run stops.
-constexpr unsigned long LOST_TIMEOUT_MS = 1500;
 
 // Backtracking: when the line is lost the rover first replays its last wheel
 // commands in reverse (newest first) to retrace its path, then falls back to
@@ -151,17 +144,24 @@ struct ModeTuning {
   int maxTurn;          // Clamp on the steering term (bang-bang: the turn used), % of DAC_SPAN
   float bangLevel;      // Bang-bang: |position| above this turns at maxTurn, 0-1
   int steerSign;        // Flip to -1 if this mode steers the wrong way on test
+  // Bang-bang wheel levels, electrical PWM duty %: 100 forward max, 50 stopped, 0 reverse max.
+  int pwmStraightLeft;  // Left wheel with the line centred
+  int pwmStraightRight;
+  int pwmCorrectLeft;   // Left wheel while it is the slow side of a correction
+  int pwmCorrectRight;
 };
 
+// pwm* columns (bang-bang only): left/right duty with the line centred, then left/right
+// duty while that wheel is the slow side of a correction.
 // Starting values only. The GUI can change them live (they are copied to RAM
 // at power-up, so a reset brings these back). Tune each mode on the stadium
 // track, then copy the best values from the GUI back into this table.
 // ki starts at 0 (plain PD). Add it only if the rover runs off-centre on the
 // long curves.
 constexpr ModeTuning MODE_TUNING[MODE_COUNT] = {
-  // travel  defaultTurn          controller       base  search  kp     ki    kd    gain   ramp   maxTurn  bang   steer
-  {  1,      TURN_CLOCKWISE,      CONTROLLER_PID,  45,   30,     60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 60,      0.3f,  1 },  // Clockwise
-  {  1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  45,   30,     60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 60,      0.3f,  1 },  // Anticlockwise
-  {  1,      TURN_CLOCKWISE,      CONTROLLER_PID,  35,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f,  1 },  // Squiggle
-  { -1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  25,   25,     50.0f, 0.0f, 1.5f, 6.0f,  30.0f, 50,      0.3f,  1 },  // Reverse
+  // travel  defaultTurn          controller       base  search  kp     ki    kd    gain   ramp   maxTurn  bang   steer  strL strR corL corR
+  {  1,      TURN_CLOCKWISE,      CONTROLLER_BANG_BANG, 85, 30,  60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 20,      0.3f,  1,     85,  85,  65,  65 },  // Clockwise: 85 % duty, slow side drops to 65 %
+  {  1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  45,   30,     60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 60,      0.3f,  1,     70,  70,  50,  50 },  // Anticlockwise
+  {  1,      TURN_CLOCKWISE,      CONTROLLER_PID,  35,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f,  1,     65,  65,  50,  50 },  // Squiggle
+  { -1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  25,   25,     50.0f, 0.0f, 1.5f, 6.0f,  30.0f, 50,      0.3f,  1,     35,  35,  50,  50 },  // Reverse
 };

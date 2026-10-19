@@ -25,8 +25,6 @@ CMD_STOP = 0x03
 CMD_SET_MODE = 0x04
 CMD_SET_SPEED = 0x05
 CMD_CALIBRATE = 0x06
-CMD_SET_DAC_LEFT = 0x07
-CMD_SET_DAC_RIGHT = 0x08
 CMD_SET_ADAPT_GAIN = 0x09
 CMD_SET_ADAPT_RAMP = 0x0A
 CMD_SET_MAX_TURN = 0x0B
@@ -36,7 +34,12 @@ CMD_SET_KI = 0x0E
 CMD_SET_BANG_LEVEL = 0x0F
 CMD_SET_CONTROLLER = 0x10   # Also while running
 CMD_RESET_INTEGRAL = 0x11
-CMD_SET_SENSOR_TEST = 0x12  # 1: motors stay off, rover reports the PWM it would drive
+# Bang-bang wheel levels (current mode), as electrical PWM duty %: 100 = full
+# forward, 50 = stopped, 0 = full reverse. data = duty %.
+CMD_SET_PWM_STRAIGHT_LEFT = 0x12
+CMD_SET_PWM_STRAIGHT_RIGHT = 0x13
+CMD_SET_PWM_CORRECT_LEFT = 0x14
+CMD_SET_PWM_CORRECT_RIGHT = 0x15
 GAIN_SCALE = 10.0
 KD_SCALE = 10.0
 BANG_LEVEL_SCALE = 100.0
@@ -45,14 +48,12 @@ BANG_LEVEL_SCALE = 100.0
 MSG_TELEMETRY = 0x20
 TELEMETRY_FRAME_LENGTH = 11
 MSG_TUNING = 0x21
-TUNING_FRAME_LENGTH = 12
+TUNING_FRAME_LENGTH = 16
 FRAME_LENGTHS = {MSG_TELEMETRY: TELEMETRY_FRAME_LENGTH, MSG_TUNING: TUNING_FRAME_LENGTH}
 
 STATUS_RUNNING = 0x01
 STATUS_LINE_LOST = 0x02
 STATUS_CALIBRATING = 0x04
-STATUS_LINK_FAILSAFE = 0x08
-STATUS_SENSOR_TEST = 0x80
 STATUS_MODE_SHIFT = 4
 STATUS_MODE_MASK = 0x07
 
@@ -85,17 +86,10 @@ CONTROLLER_NAMES = {
 ADC_TO_BYTE_SCALE = 4  # Firmware sends the 10-bit ADC reading >> 2
 
 # DAC0800 -> PWM -> push-pull stage: code 0 = -15 V, 128 ~ 0 V, 255 = +15 V at
-# the motor (Lab 3 sweep). A data byte stops at DATA_MAX, so DATA_MAX on a DAC
-# command or telemetry field stands for full scale (255). Code 254 is never used.
+# the motor (Lab 3 sweep). A data byte stops at DATA_MAX, so DATA_MAX on a telemetry
+# DAC field stands for full scale (255). Code 254 is never used.
 DAC_FULL_SCALE = 255
 MOTOR_VOLTS_MAX = 15.0
-
-
-def volts_to_dac(volts):
-    """Motor voltage (-15..+15 V) -> DAC code (0..255)."""
-    volts = max(-MOTOR_VOLTS_MAX, min(float(volts), MOTOR_VOLTS_MAX))
-    code = round((volts + MOTOR_VOLTS_MAX) * DAC_FULL_SCALE / (2 * MOTOR_VOLTS_MAX))
-    return DAC_FULL_SCALE if code == DATA_MAX else code   # 254 cannot be sent
 
 
 def dac_to_volts(code):
@@ -134,11 +128,9 @@ class Telemetry:
     running: bool
     line_lost: bool
     calibrating: bool
-    link_failsafe: bool
     mode: int
     left_white: bool = False    # Steady 1/0 from the rover: True = on the white line
     right_white: bool = False
-    sensor_test: bool = False   # Motors held off, dac_* is what the controller would drive
 
 
 def decode_telemetry(frame):
@@ -153,11 +145,9 @@ def decode_telemetry(frame):
         running=bool(status & STATUS_RUNNING),
         line_lost=bool(status & STATUS_LINE_LOST),
         calibrating=bool(status & STATUS_CALIBRATING),
-        link_failsafe=bool(status & STATUS_LINK_FAILSAFE),
         mode=(status >> STATUS_MODE_SHIFT) & STATUS_MODE_MASK,
         left_white=bool(frame[9] & SENSOR_LEFT_WHITE),
         right_white=bool(frame[9] & SENSOR_RIGHT_WHITE),
-        sensor_test=bool(status & STATUS_SENSOR_TEST),
     )
 
 
@@ -173,6 +163,10 @@ class Tuning:
     kd: float
     ki: float
     bang_level: float   # Bang-bang: |position| that triggers a full turn, 0-1
+    pwm_straight_left: int = 50    # Bang-bang wheel levels, PWM duty %
+    pwm_straight_right: int = 50
+    pwm_correct_left: int = 50
+    pwm_correct_right: int = 50
 
 
 def decode_tuning(frame):
@@ -186,7 +180,20 @@ def decode_tuning(frame):
         kd=frame[8] / KD_SCALE,
         ki=frame[9],
         bang_level=frame[10] / BANG_LEVEL_SCALE,
+        pwm_straight_left=frame[11],
+        pwm_straight_right=frame[12],
+        pwm_correct_left=frame[13],
+        pwm_correct_right=frame[14],
     )
+
+
+# The four bang-bang wheel levels: (Tuning field, command, label)
+PWM_LEVELS = (
+    ("pwm_straight_left", CMD_SET_PWM_STRAIGHT_LEFT, "Left wheel, line centred"),
+    ("pwm_straight_right", CMD_SET_PWM_STRAIGHT_RIGHT, "Right wheel, line centred"),
+    ("pwm_correct_left", CMD_SET_PWM_CORRECT_LEFT, "Left wheel, slowed to turn left"),
+    ("pwm_correct_right", CMD_SET_PWM_CORRECT_RIGHT, "Right wheel, slowed to turn right"),
+)
 
 
 DECODERS = {MSG_TELEMETRY: decode_telemetry, MSG_TUNING: decode_tuning}

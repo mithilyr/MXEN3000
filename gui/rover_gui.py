@@ -42,7 +42,7 @@ import xbee_setup as xb
 
 # ---- Link ----
 BAUD_RATE = xb.LINK_BAUD       # 38400 (Pairing Guide step 15) = LINK_BAUD in config.h
-HEARTBEAT_MS = 200              # Rover failsafe is LINK_TIMEOUT_MS = 1200
+HEARTBEAT_MS = 200              # Keeps the link warm; the rover does not stop if it is lost
 TELEMETRY_STALE_S = 1.2         # No telemetry for this long = link down
 READ_CHUNK_BYTES = 256
 READ_IDLE_S = 0.005
@@ -51,7 +51,8 @@ READ_IDLE_S = 0.005
 UI_REFRESH_MS = 50
 SPEED_STEP = 5
 SPEED_MAX = 100
-BENCH_VOLTS_STEP = 1.0         # One - or + press on the bench test panel
+WHEEL_BAR_WIDTH = 260         # PWM bar: 0 % at the left edge, 100 % at the right
+WHEEL_BAR_HEIGHT = 26
 CHART_SAMPLES = 200
 CHART_WIDTH = 640
 CHART_HEIGHT = 140             # Minimum; the chart grows to fill spare height
@@ -74,6 +75,9 @@ READOUT_FONT = ("Consolas", 12)
 DEFAULT_LOG_FILE = "run-log.csv"
 RUN_LOG_HEADER = ["date", "division", "attempt", "time_s", "result", "notes"]
 TUNING_FILE = "tuning.json"     # Saved next to the run log, one entry per mode
+PWM_FILE = "pwm_levels.json"    # Bang-bang wheel levels from the PWM test window, one entry per mode
+PWM_STEP = 5                    # Slider increment, % duty
+PWM_USER_HOLD_S = 1.5           # After a slider move, ignore the rover echo this long
 OPTIMISER_FILE = "optimizer.json"  # Every rated run, saved next to the run log
 XBEE_FILE = "xbee.json"         # Pair XBees: PAN ID and both serial numbers
 PAIR_POLL_MS = 50
@@ -116,7 +120,7 @@ COLOUR_GRID = "#222a37"
 COLOUR_CHART_CENTRE = "#3a4455"
 COLOUR_ORB_DIM = "#3a4455"
 COLOUR_ORB_RUN = "#a6f3b8"
-LEFT_COLUMN_WIDTH = 520         # Fixed, so a long bench readout cannot resize it
+LEFT_COLUMN_WIDTH = 520         # Fixed, so a long readout cannot resize it
 SCROLLBAR_ALLOWANCE = 20        # Window width added beside the page for the scrollbar
 SCREEN_MARGIN = 40
 TASKBAR_ALLOWANCE = 90          # Keeps the window clear of the title bar and taskbar
@@ -204,6 +208,9 @@ class RoverGUI:
         self.was_calibrating = False
         self.tuning = None              # Last Tuning frame from the rover
         self.tuning_target = {}         # Requested values the rover has not echoed yet
+        self.pwm_window = None          # The PWM test window, while open
+        self.pwm_applied = False        # Saved wheel levels sent since the last connect/mode change
+        self.pwm_target = {}            # (mode, field): requested wheel level the rover has not echoed
         self.tuning_sent = 0.0
         self.controller_target = None   # Controller asked for with T, until the rover echoes it
         self.controller_sent = 0.0
@@ -355,6 +362,7 @@ class RoverGUI:
         self.connect_button = self._button(row, "Connect", self.toggle_connection)
         self.connect_button.pack(side=tk.LEFT, padx=(6, 0))
         self._button(row, "Pair XBees", self.open_pairing).pack(side=tk.LEFT, padx=(6, 0))
+        self._button(row, "PWM test", self.open_pwm_window).pack(side=tk.LEFT, padx=(6, 0))
         self.link_label = ttk.Label(controls, text="\u25cf Disconnected", style="Panel.TLabel",
                                     foreground=COLOUR_BAD)
         self.link_label.pack(anchor=tk.E, pady=(6, 0))
@@ -417,7 +425,7 @@ class RoverGUI:
 
         self._build_run_panel(left)
         self._build_mode_panel(left)
-        self._build_bench_panel(left)
+        self._build_wheels_panel(left)
         self._build_chart_panel(right)
         self._build_tuning_panel(right)
         self._build_optimiser_panel(right)
@@ -466,48 +474,25 @@ class RoverGUI:
                             takefocus=0).pack(side=tk.LEFT, padx=(0, 10))
         self._button(panel, "Calibrate sensors  [C]", self.calibrate).pack(fill=tk.X, pady=(4, 0))
 
-    def _build_bench_panel(self, parent):
-        panel = self._panel(parent, "BENCH TEST  (motor volts, stopped only)", fill=tk.BOTH,
+    def _build_wheels_panel(self, parent):
+        panel = self._panel(parent, "WHEELS  (PWM %, 50 % = stopped)", fill=tk.BOTH,
                             expand=True)   # Stretches so the left column ends level with the right
-        self.bench_vars = {}
-        self.bench_code_labels = {}
-        for name, command in (("Left", p.CMD_SET_DAC_LEFT), ("Right", p.CMD_SET_DAC_RIGHT)):
+        self.wheel_widgets = {}
+        for side, colour in (("Left", COLOUR_IR_LEFT), ("Right", COLOUR_IR_RIGHT)):
+            ttk.Label(panel, text=side.upper(), style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
             row = ttk.Frame(panel, style="Plain.TFrame")
-            row.pack(fill=tk.X, pady=2)
-            var = tk.DoubleVar(value=0.0)
-            self.bench_vars[command] = var
-            ttk.Label(row, text=name, width=6, style="Panel.TLabel").pack(side=tk.LEFT)
-            tk.Scale(row, from_=-p.MOTOR_VOLTS_MAX, to=p.MOTOR_VOLTS_MAX,
-                     resolution=BENCH_VOLTS_STEP, orient=tk.HORIZONTAL, variable=var,
-                     length=160, bg=COLOUR_PANEL, fg=COLOUR_TEXT, highlightthickness=0,
-                     troughcolor=COLOUR_BORDER, activebackground=COLOUR_BLUE,
-                     takefocus=0).pack(side=tk.LEFT)
-            for text, step in (("-", -BENCH_VOLTS_STEP), ("+", BENCH_VOLTS_STEP)):
-                self._button(row, text, lambda c=command, s=step: self.nudge_bench(c, s),
-                             min_width=34).pack(side=tk.LEFT, padx=1)
-            self._button(row, "Send", lambda c=command: self.send_bench(c)).pack(side=tk.LEFT, padx=4)
-            code_label = ttk.Label(panel, text="", style="Muted.TLabel")
-            code_label.pack(anchor=tk.W)
-            self.bench_code_labels[command] = code_label
-            var.trace_add("write", lambda *_, c=command: self._bench_changed(c))
-            self._bench_changed(command)
-        self.bench_linked = tk.BooleanVar(value=False)
-        ttk.Checkbutton(panel.header, text="Same voltage on both", variable=self.bench_linked,
-                        style="Panel.TCheckbutton", takefocus=0,
-                        command=lambda: self._bench_changed(p.CMD_SET_DAC_LEFT)).pack(side=tk.RIGHT)
-        self.sensor_test_var = tk.BooleanVar(value=False)
-        self.sensor_test_sent = 0.0
-        ttk.Checkbutton(panel, text="Sensor test: motors stay off, show the PWM the sensors would give",
-                        variable=self.sensor_test_var, style="Panel.TCheckbutton", takefocus=0,
-                        command=self.toggle_sensor_test).pack(anchor=tk.W, pady=(6, 0))
-        self.live_pwm_label = ttk.Label(panel, text="Live PWM: no telemetry", style="Panel.TLabel",
-                                        justify=tk.LEFT)
-        self.live_pwm_label.pack(anchor=tk.W, pady=(2, 0))
-        buttons = ttk.Frame(panel, style="Plain.TFrame")
-        buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
-        self._button(buttons, "Send both", self.send_bench_both).pack(side=tk.LEFT, expand=True, fill=tk.X)
-        self._button(buttons, "Both to 0 V", self.bench_neutral).pack(side=tk.LEFT, expand=True,
-                                                                     fill=tk.X, padx=(4, 0))
+            row.pack(fill=tk.X)
+            value = ttk.Label(row, text="--", style="Big.TLabel", width=7)
+            value.pack(side=tk.LEFT)
+            bar = tk.Canvas(row, width=WHEEL_BAR_WIDTH, height=WHEEL_BAR_HEIGHT,
+                            bg=COLOUR_CHART_BG, highlightthickness=0)
+            bar.pack(side=tk.LEFT, padx=8)
+            fill = bar.create_rectangle(0, 0, 0, WHEEL_BAR_HEIGHT, fill=colour, outline="")
+            bar.create_line(WHEEL_BAR_WIDTH / 2, 0, WHEEL_BAR_WIDTH / 2, WHEEL_BAR_HEIGHT,
+                            fill=COLOUR_TEXT, dash=(2, 2))
+            detail = ttk.Label(panel, text="", style="Muted.TLabel", font=READOUT_FONT)
+            detail.pack(anchor=tk.W)
+            self.wheel_widgets[side] = (value, bar, fill, detail)
 
     def _build_chart_panel(self, parent):
         panel = self._panel(parent, "SENSORS  (level 0-1: 1 = white line, 0 = black table)",
@@ -682,6 +667,7 @@ class RoverGUI:
         if self.link.is_open:
             self.link.send(p.CMD_STOP)
             self.link.close()
+            self.pwm_applied = False
             self.connect_button.config(text="Connect")
             return
         selection = self.port_box.get()
@@ -704,6 +690,65 @@ class RoverGUI:
                 return
             self.toggle_connection()
         PairingDialog(self)
+
+    # ================================================================
+    # PWM test window: bang-bang wheel levels
+    # ================================================================
+    def open_pwm_window(self):
+        if self.pwm_window is not None:
+            self.pwm_window.window.lift()
+            return
+        self.pwm_window = PwmWindow(self)
+
+    def _pwm_path(self):
+        return os.path.join(os.path.dirname(self.log_path), PWM_FILE)
+
+    def _load_saved_pwm(self):
+        try:
+            with open(self._pwm_path(), encoding="utf-8") as saved_file:
+                return json.load(saved_file)
+        except (OSError, ValueError):
+            return {}
+
+    def _save_pwm(self):
+        """Remember this mode's four levels so they come back after a rover reset."""
+        if self.tuning is None:
+            return
+        saved = self._load_saved_pwm()
+        levels = self.pwm_levels()
+        saved[p.MODE_NAMES[self.tuning.mode]] = {
+            field: levels[field] for field, _command, _label in p.PWM_LEVELS}
+        try:
+            with open(self._pwm_path(), "w", encoding="utf-8") as saved_file:
+                json.dump(saved, saved_file, indent=2)
+        except OSError:
+            pass
+
+    def pwm_levels(self):
+        """The levels the window shows: requested values until the rover echoes them."""
+        return {field: self.pwm_target.get((self.tuning.mode, field), getattr(self.tuning, field))
+                for field, _command, _label in p.PWM_LEVELS}
+
+    def set_pwm_level(self, field, command, value):
+        if not self.link_alive() or self.tuning is None:
+            return
+        value = max(0, min(100, int(value)))
+        if self.link.send(command, value):
+            self.pwm_target[(self.tuning.mode, field)] = value
+            self._save_pwm()
+
+    def _apply_saved_pwm(self):
+        """After a connect or mode change, send the saved levels the rover does not have."""
+        if self.pwm_applied or self.tuning is None:
+            return
+        self.pwm_applied = True
+        saved = self._load_saved_pwm().get(p.MODE_NAMES[self.tuning.mode])
+        if not saved:
+            return
+        for field, command, _label in p.PWM_LEVELS:
+            value = saved.get(field)
+            if isinstance(value, int) and value != getattr(self.tuning, field):
+                self.link.send(command, max(0, min(100, value)))
 
     def link_alive(self):
         return self.telemetry is not None and \
@@ -773,58 +818,18 @@ class RoverGUI:
             return
         self.link.send(p.CMD_CALIBRATE)
 
-    def _bench_volts(self, command):
-        try:
-            return self.bench_vars[command].get()
-        except tk.TclError:   # Mid-edit or empty value
-            return 0.0
-
-    def _bench_changed(self, command):
-        volts = self._bench_volts(command)
-        if getattr(self, "bench_linked", None) is not None and self.bench_linked.get():
-            for other, var in self.bench_vars.items():
-                if other != command and abs(self._bench_volts(other) - volts) > 1e-6:
-                    var.set(volts)   # Re-enters here for the other side
-        code = p.volts_to_dac(volts)
-        self.bench_code_labels[command].config(
-            text=f"       {volts:+5.1f} V -> DAC {code:3d} -> PWM {p.dac_to_percent(code):5.1f} %"
-                 f" (actual {p.dac_to_volts(code):+.2f} V)")
-
-    def nudge_bench(self, command, step):
-        volts = self._bench_volts(command) + step
-        volts = max(-p.MOTOR_VOLTS_MAX, min(p.MOTOR_VOLTS_MAX, volts))
-        self.bench_vars[command].set(round(volts, 1))
-
-    def toggle_sensor_test(self):
-        on = self.sensor_test_var.get()
-        self.sensor_test_sent = time.monotonic()
-        if not self.link.send(p.CMD_SET_SENSOR_TEST, int(on)):
-            self.sensor_test_var.set(False)
-
-    def _update_live_pwm(self, t):
-        # Follow the rover: START or a calibration switches the test off.
-        if (t.sensor_test != self.sensor_test_var.get() and
-                time.monotonic() - self.sensor_test_sent > TUNING_CONFIRM_S):
-            self.sensor_test_var.set(t.sensor_test)
-        lines = []
-        for name, dac, white in (("Left ", t.dac_left, t.left_white), ("Right", t.dac_right, t.right_white)):
-            lines.append(f"{name}  sensor {'WHITE' if white else 'black'}   "
-                         f"PWM {p.dac_to_percent(dac):5.1f} %   "
-                         f"({p.dac_to_volts(dac):+.1f} V, DAC {dac:3d})")
-        self.live_pwm_label.config(text="\n".join(lines))
-
-    def send_bench(self, command):
-        if not self.rover_running():
-            self.link.send(command, p.volts_to_dac(self._bench_volts(command)))
-
-    def send_bench_both(self):
-        for command in self.bench_vars:
-            self.send_bench(command)
-
-    def bench_neutral(self):
-        for var in self.bench_vars.values():
-            var.set(0.0)
-        self.send_bench_both()
+    def _update_wheels(self, t):
+        for side, dac, level, white in (("Left", t.dac_left, t.ir_left, t.left_white),
+                                        ("Right", t.dac_right, t.ir_right, t.right_white)):
+            value, bar, fill, detail = self.wheel_widgets[side]
+            percent = p.dac_to_percent(dac)
+            value.config(text=f"{percent:5.1f}%")
+            half = WHEEL_BAR_WIDTH / 2
+            x = percent / 100 * WHEEL_BAR_WIDTH
+            bar.coords(fill, min(x, half), 0, max(x, half), WHEEL_BAR_HEIGHT)
+            detail.config(text=f"{p.dac_to_volts(dac):+.1f} V   DAC {dac:3d}   "
+                               f"sensor {sensor_level(level):.2f} "
+                               f"{'WHITE line' if white else 'black'}")
 
     def _heartbeat(self):
         self.link.send(p.CMD_PING)
@@ -926,7 +931,7 @@ class RoverGUI:
         """Keep the run until the operator presses Y (clean lap) or N (failed).
         A radio dropout says nothing about the settings, so it is not offered."""
         self.unrated_run = None
-        if result == "link failsafe" or self.tuning is None or self.telemetry is None \
+        if self.tuning is None or self.telemetry is None \
                 or self.tuning.mode != mode:
             return
         controller = self._controller()
@@ -1110,9 +1115,7 @@ class RoverGUI:
 
         rover_stopped_itself = previous is not None and previous.running and not telemetry.running
         if rover_stopped_itself and self.run_start is not None:
-            if telemetry.link_failsafe:
-                self._finish_run("link failsafe")
-            elif telemetry.line_lost:
+            if telemetry.line_lost:
                 self._finish_run("line lost")
             else:
                 self._finish_run("stopped")
@@ -1141,8 +1144,6 @@ class RoverGUI:
             return
         if t.calibrating:
             state, colour = "CALIBRATING", COLOUR_WARN
-        elif t.sensor_test:
-            state, colour = "SENSOR TEST", COLOUR_WARN
         elif t.running:
             state, colour = "RUNNING", COLOUR_OK
         else:
@@ -1152,11 +1153,9 @@ class RoverGUI:
         flags = [p.MODE_NAMES[t.mode], p.CONTROLLER_NAMES.get(self._controller(), "")]
         if t.line_lost:
             flags.append("LINE LOST")
-        if t.link_failsafe:
-            flags.append("LINK FAILSAFE TRIPPED")
         self.detail_label.config(text="   ".join(flags))
         self.speed_label.config(text=f"Base speed: {t.speed} %")
-        self._update_live_pwm(t)
+        self._update_wheels(t)
         if not t.running and self.selected_mode.get() != t.mode:
             self.selected_mode.set(t.mode)
         if self.tuning is not None and self.selected_controller.get() != self._controller():
@@ -1214,6 +1213,9 @@ class RoverGUI:
     def _on_tuning(self, tuning):
         mode_changed = self.tuning is None or tuning.mode != self.tuning.mode
         self.tuning = tuning
+        if mode_changed:
+            self.pwm_applied = False
+        self._apply_saved_pwm()
         if mode_changed or time.monotonic() - self.tuning_sent > TUNING_CONFIRM_S:
             self.tuning_target.clear()
         # Echoed, or not taken within the confirm time (old firmware refuses while running).
@@ -1390,8 +1392,6 @@ class RoverGUI:
             return "Slide the rover slowly across the line"
         if t.running:
             return "Running - Space to stop, Esc for emergency stop, Up/Down for speed"
-        if t.link_failsafe:
-            return "Link failsafe tripped - check the radio, then press Space to restart"
         if not self.calibrated:
             return "Press C and sweep the rover across the line (optional for 1/0 sensors)"
         return f"Mode: {p.MODE_NAMES[t.mode]} - put the rover on the line and press Space"
@@ -1434,6 +1434,99 @@ class RoverGUI:
         self.link.close()
         self._close_sample_log()
         self.root.destroy()
+
+
+class PwmWindow:
+    """Separate test window: set the bang-bang wheel levels of the current mode as
+    electrical PWM duty (100 % = full forward, 50 % = stopped, 0 % = full reverse).
+    Changes reach the rover at once, also while it runs, and are saved per mode."""
+
+    def __init__(self, gui):
+        self.gui = gui
+        self.user_time = 0.0
+        self.syncing = False
+        self.window = tk.Toplevel(gui.root)
+        self.window.title("PWM test")
+        self.window.configure(bg=SOLID_BG)
+        glass.dark_title_bar(self.window)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        panel = gui._panel(self.window, "PWM TEST", fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.note = ttk.Label(panel, text="", style="Panel.TLabel", wraplength=460,
+                              justify=tk.LEFT)
+        self.note.pack(anchor=tk.W, pady=(0, 6))
+        ttk.Label(panel, style="Muted.TLabel", wraplength=460, justify=tk.LEFT,
+                  text="100 % = full forward, 50 % = stopped, 0 % = full reverse. "
+                       "'Slowed to turn' is the duty a wheel drops to when the other sensor "
+                       "reads black.").pack(anchor=tk.W, pady=(0, 6))
+        self.vars = {}
+        self.value_labels = {}
+        for field, command, label in p.PWM_LEVELS:
+            ttk.Label(panel, text=label, style="Panel.TLabel").pack(anchor=tk.W, pady=(6, 0))
+            row = ttk.Frame(panel, style="Plain.TFrame")
+            row.pack(fill=tk.X)
+            var = tk.IntVar(value=50)
+            self.vars[field] = var
+            tk.Scale(row, from_=0, to=100, resolution=PWM_STEP, orient=tk.HORIZONTAL,
+                     variable=var, length=300, showvalue=False, bg=COLOUR_PANEL, fg=COLOUR_TEXT,
+                     highlightthickness=0, troughcolor=COLOUR_BORDER, activebackground=COLOUR_BLUE,
+                     takefocus=0,
+                     command=lambda _v, f=field, c=command: self._moved(f, c)).pack(side=tk.LEFT)
+            value = ttk.Label(row, text="--", style="Panel.TLabel", width=26,
+                              font=(FONT_FAMILY, 11, "bold"))
+            value.pack(side=tk.LEFT, padx=8)
+            self.value_labels[field] = value
+        self.rover_label = ttk.Label(panel, text="", style="Muted.TLabel", font=READOUT_FONT)
+        self.rover_label.pack(anchor=tk.W, pady=(8, 0))
+        self.bang_button = gui._button(panel, "Use Bang-bang controller",
+                                       lambda: gui.select_controller(p.CONTROLLER_BANG_BANG))
+        self.bang_button.pack(fill=tk.X, pady=(6, 0))
+        self._poll()
+
+    @staticmethod
+    def _describe(duty):
+        speed = (duty - 50) * 2
+        volts = duty * 30 / 100 - 15
+        return f"{duty:3d} %   {volts:+5.1f} V   speed {speed:+4d} %"
+
+    def _moved(self, field, command):
+        if self.syncing:
+            return
+        self.user_time = time.monotonic()
+        value = self.vars[field].get()
+        self.value_labels[field].config(text=self._describe(value))
+        self.gui.set_pwm_level(field, command, value)
+
+    def _poll(self):
+        gui = self.gui
+        tuning = gui.tuning
+        ready = gui.link_alive() and tuning is not None
+        if not ready:
+            self.note.config(text="Connect to the rover first.", foreground=COLOUR_WARN)
+            self.rover_label.config(text="")
+        else:
+            bang = tuning.controller == p.CONTROLLER_BANG_BANG
+            self.note.config(
+                text=f"Mode: {p.MODE_NAMES[tuning.mode]}  \u00b7  controller: "
+                     f"{p.CONTROLLER_NAMES.get(tuning.controller, '?')}"
+                     + ("" if bang else "  -  these levels only apply to the Bang-bang controller"),
+                foreground=COLOUR_TEXT if bang else COLOUR_WARN)
+            if time.monotonic() - self.user_time > PWM_USER_HOLD_S:
+                self.syncing = True
+                for field, _command, _label in p.PWM_LEVELS:
+                    value = getattr(tuning, field)
+                    self.vars[field].set(value)
+                    self.value_labels[field].config(text=self._describe(value))
+                self.syncing = False
+            self.rover_label.config(
+                text=f"Rover has: L {tuning.pwm_straight_left}/{tuning.pwm_correct_left}  "
+                     f"R {tuning.pwm_straight_right}/{tuning.pwm_correct_right}  (centred/slowed)")
+        gui._set_enabled(self.bang_button, ready)
+        self.after_id = self.window.after(200, self._poll)
+
+    def close(self):
+        self.window.after_cancel(self.after_id)
+        self.gui.pwm_window = None
+        self.window.destroy()
 
 
 class PairingDialog:

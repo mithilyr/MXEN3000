@@ -13,9 +13,9 @@ def telemetry_frame(ir_left=10, ir_right=200, dac_left=128, dac_right=140,
 
 
 def tuning_frame(mode=p.MODE_SQUIGGLE, controller=p.CONTROLLER_BANG_BANG, gain=105, ramp=60,
-                 max_turn=70, kp=80, kd=15, ki=20, bang_level=35):
+                 max_turn=70, kp=80, kd=15, ki=20, bang_level=35, pwm=(85, 80, 65, 60)):
     body = [p.FRAME_START, p.MSG_TUNING, mode, controller, gain, ramp, max_turn, kp, kd,
-            ki, bang_level]
+            ki, bang_level, *pwm]
     return bytes(body + [p.checksum(body)])
 
 
@@ -24,21 +24,10 @@ class ProtocolTests(unittest.TestCase):
         frame = p.encode_command(p.CMD_SET_SPEED, 50)
         self.assertEqual(frame, bytes([0xFF, 0x05, 50, (0xFF + 0x05 + 50) & 0xFF]))
 
-    def test_command_data_never_frame_start(self):
-        self.assertEqual(p.encode_command(p.CMD_SET_DAC_LEFT, 255)[2], p.DATA_MAX)
-
-    def test_volts_to_dac(self):
-        self.assertEqual(p.volts_to_dac(-15), 0)
-        self.assertEqual(p.volts_to_dac(0), 128)
-        self.assertEqual(p.volts_to_dac(15), 255)
-        self.assertEqual(p.volts_to_dac(99), 255)
-        self.assertAlmostEqual(p.dac_to_volts(p.volts_to_dac(5.0)), 5.0, delta=0.06)
-
     def test_full_scale_dac_survives_data_clamp(self):
-        frame = p.encode_command(p.CMD_SET_DAC_RIGHT, p.volts_to_dac(15))
-        self.assertEqual(p.dac_from_data(frame[2]), p.DAC_FULL_SCALE)
         [t] = p.TelemetryParser().feed(telemetry_frame(dac_left=p.DATA_MAX))
         self.assertEqual(t.dac_left, p.DAC_FULL_SCALE)
+        self.assertAlmostEqual(p.dac_to_percent(t.dac_left), 100.0)
 
     def test_decode_fields(self):
         status = p.STATUS_RUNNING | p.STATUS_LINE_LOST | (p.MODE_REVERSE << p.STATUS_MODE_SHIFT)
@@ -46,7 +35,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(t.ir_left, 40)
         self.assertAlmostEqual(t.position, 1.0)
         self.assertTrue(t.running and t.line_lost)
-        self.assertFalse(t.calibrating or t.link_failsafe)
+        self.assertFalse(t.calibrating)
         self.assertEqual(t.mode, p.MODE_REVERSE)
 
     def test_resync_after_garbage_and_split_frames(self):
@@ -66,6 +55,8 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual((t.adapt_ramp, t.max_turn, t.kp, t.ki), (60, 70, 80, 20))
         self.assertAlmostEqual(t.kd, 1.5)
         self.assertAlmostEqual(t.bang_level, 0.35)
+        self.assertEqual((t.pwm_straight_left, t.pwm_straight_right,
+                          t.pwm_correct_left, t.pwm_correct_right), (85, 80, 65, 60))
 
     def test_mixed_frame_types_in_one_stream(self):
         stream = telemetry_frame() + tuning_frame() + telemetry_frame()
