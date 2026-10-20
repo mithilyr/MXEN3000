@@ -1,5 +1,5 @@
 """Pairs two XBee S2C radios from the GUI, following the unit's
-"Xbee Pairing Guide.pdf" (../../Xbee Pairing Guide.pdf) without XCTU.
+"Xbee Pairing Guide.pdf" (../../../Xbee Pairing Guide.pdf) without XCTU.
 
 The guide's XCTU steps, as AT commands (Digi's documented command mode:
 guard time of silence, "+++", wait for "OK", one "AT<cmd><value>\\r" per
@@ -49,7 +49,11 @@ READ_POLL_S = 0.01
 CHECK_COMMANDS = ("ID", "CE", "NI", "BD", "AP", "DH", "DL")
 # ZS only exists on Zigbee firmware (802.15.4 firmware answers ERROR).
 IDENTITY_COMMANDS = ("VR", "SH", "SL", "ZS")
-INFO_COMMANDS = ("VR", "HV", "SH", "SL", "ZS") + CHECK_COMMANDS
+# Radio quality, read only (never written): CH channel, PL power level
+# (4 = highest), PM boost mode (1 = on), SM sleep (0 = always awake), DB signal
+# strength of the last packet received (-dBm, hex; lower = stronger).
+RADIO_COMMANDS = ("CH", "PL", "PM", "SM", "DB")
+INFO_COMMANDS = ("VR", "HV", "SH", "SL", "ZS") + CHECK_COMMANDS + RADIO_COMMANDS
 
 
 class XBeeError(Exception):

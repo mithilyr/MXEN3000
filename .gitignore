@@ -3,3 +3,9 @@ build/
 dist/
 __pycache__/
 *.pyc
+
+# PyInstaller writes these on every build (see build_exe*.bat)
+*.spec
+# Run logs and saved settings from running the GUI from source
+logs/
+settings/

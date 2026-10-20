@@ -89,5 +89,48 @@ class OptimiserTests(unittest.TestCase):
         self.assertLess(slowest_step, 3.0)   # Fast enough to press G between runs
 
 
+BANG = p.CONTROLLER_BANG_BANG
+BANG_BASELINE = {"pwm_straight": 70, "pwm_correct": 55}
+
+
+def bang_lap(settings):
+    """Faster with a higher straight duty, but the slow wheel must turn harder
+    (lower correction duty) to hold the line. Best clean lap: straight 100, correct 52."""
+    straight, correct = settings["pwm_straight"], settings["pwm_correct"]
+    if straight - correct < (straight - 50) * 0.5:
+        return None                                     # Ran wide off a corner
+    return 500 / (straight - 50) + abs(correct - 52) * 0.3
+
+
+def bang_run(settings):
+    lap = bang_lap(settings)
+    return opt.Run(dict(settings), lap or 0.0, lap is not None)
+
+
+class BangBangTests(unittest.TestCase):
+    def test_searches_only_the_wheel_duties(self):
+        keys = {d.key for d in opt.SEARCH_SPACE[BANG]}
+        self.assertEqual(keys, set(opt.PWM_PAIRS))
+
+    def test_old_bang_level_runs_are_ignored(self):
+        old = opt.Run({"speed": 40, "bang_level": 0.3, "max_turn": 60}, 12.0, True)
+        self.assertFalse(opt.LapOptimiser(BANG, [old]).ready)
+
+    def test_slow_wheel_stays_slower(self):
+        runs = [opt.Run({"pwm_straight": 56, "pwm_correct": 55}, 30.0, True)]
+        for seed in range(20):
+            suggestion = opt.LapOptimiser(BANG, runs, random.Random(seed)).suggest()
+            self.assertLess(suggestion["pwm_correct"], suggestion["pwm_straight"])
+
+    def test_finds_a_faster_lap_in_15_runs(self):
+        start = bang_lap(BANG_BASELINE)
+        rng = random.Random(5)
+        runs = [bang_run(BANG_BASELINE)]
+        for _ in range(15):
+            runs.append(bang_run(opt.LapOptimiser(BANG, runs, rng).suggest()))
+        best_lap = min(r.time_s for r in runs if r.clean)
+        self.assertLess(best_lap, start * 0.85)
+
+
 if __name__ == "__main__":
     unittest.main()

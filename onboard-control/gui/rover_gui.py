@@ -25,6 +25,7 @@ import json
 import math
 import os
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -72,13 +73,23 @@ LEVEL_BAR_HEIGHT = 18
 FONT_FAMILY = "Segoe UI"
 GUIDE_FONT = (FONT_FAMILY, 12, "bold")
 READOUT_FONT = ("Consolas", 12)
+# Next to the .exe (or this script): logs/ for run-log.csv and the ir-log CSVs,
+# settings/ for the .json files, so the .exe folder stays tidy.
+APP_DIR = os.path.dirname(sys.executable if getattr(sys, "frozen", False)
+                          else os.path.abspath(__file__))
+LOG_DIR = os.path.join(APP_DIR, "logs")
+SETTINGS_DIR = os.path.join(APP_DIR, "settings")
 DEFAULT_LOG_FILE = "run-log.csv"
-RUN_LOG_HEADER = ["date", "division", "attempt", "time_s", "result", "notes"]
-TUNING_FILE = "tuning.json"     # Saved next to the run log, one entry per mode
+# notes = the tuning used (written by the GUI); note = what the operator typed after the run.
+RUN_LOG_HEADER = ["date", "division", "attempt", "time_s", "result", "notes", "track", "note"]
+TRACKS = ("Test", "Competition")   # Runs and optimiser ratings are kept apart per track
+SESSION_FILE = "session.json"   # The last selected track
+NOTE_WIDTH = 34                 # Characters
+TUNING_FILE = "tuning.json"     # In SETTINGS_DIR, one entry per mode
 PWM_FILE = "pwm_levels.json"    # Bang-bang wheel levels from the PWM test window, one entry per mode
 PWM_STEP = 5                    # Slider increment, % duty
 PWM_USER_HOLD_S = 1.5           # After a slider move, ignore the rover echo this long
-OPTIMISER_FILE = "optimizer.json"  # Every rated run, saved next to the run log
+OPTIMISER_FILE = "optimizer.json"  # Every rated run
 XBEE_FILE = "xbee.json"         # Pair XBees: PAN ID and both serial numbers
 PAIR_POLL_MS = 50
 TUNING_CONFIRM_S = 0.6          # Wait this long for the rover to echo a change
@@ -218,12 +229,18 @@ class RoverGUI:
         self.widget_cache = {}          # Last options set by _set_widget
         self.calibrated = False
         self.attempts = {mode: 0 for mode in p.MODE_NAMES}
-        self.log_path = os.path.abspath(DEFAULT_LOG_FILE)
+        for folder in (LOG_DIR, SETTINGS_DIR):
+            os.makedirs(folder, exist_ok=True)
+        self.log_path = os.path.join(LOG_DIR, DEFAULT_LOG_FILE)
         self.sample_file = None
         self.sample_writer = None
         self.sample_path = None
         self.unrated_run = None         # Last finished run, waiting for Y / N
         self.optimiser_note = ""
+        self.track_name = tk.StringVar(value=self._load_session().get("track", TRACKS[0]))
+        self.run_track = None           # Track of the run in progress
+        self.last_log_row = None        # run-log.csv row of the last run, for its note
+        self.last_history_item = None
 
         self.chart = {name: deque(maxlen=CHART_SAMPLES)
                       for name in ("left", "right", "position")}
@@ -450,6 +467,25 @@ class RoverGUI:
         self._button(buttons, "EMERGENCY STOP  [Esc]", self.stop_run,
                      "danger").pack(fill=tk.X, pady=4)
 
+        tracks = ttk.Frame(panel, style="Plain.TFrame")
+        tracks.pack(fill=tk.X)
+        ttk.Label(tracks, text="Track:", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+        for name in TRACKS:
+            ttk.Radiobutton(tracks, text=name, value=name, variable=self.track_name,
+                            style="Panel.TRadiobutton", command=self.select_track,
+                            takefocus=0).pack(side=tk.LEFT, padx=(0, 12))
+        notes = ttk.Frame(panel, style="Plain.TFrame")
+        notes.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(notes, text="Note on last run:", style="Muted.TLabel").pack(side=tk.LEFT,
+                                                                           padx=(0, 8))
+        self.note_entry = ttk.Entry(notes, width=NOTE_WIDTH)
+        self.note_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.note_entry.bind("<Return>", self.save_note)
+        self.note_hint = ttk.Label(panel, text="Click the box, type, Enter to save."
+                                               " Hotkeys pause while typing (Esc still stops).",
+                                   style="Muted.TLabel")
+        self.note_hint.pack(anchor=tk.W)
+
     def _build_mode_panel(self, parent):
         panel = self._panel(parent, "MODE  (keys 1-4, only while stopped)", fill=tk.X)
         modes = ttk.Frame(panel, style="Plain.TFrame")
@@ -621,12 +657,12 @@ class RoverGUI:
 
     def _build_history_panel(self, parent):
         panel = self._panel(parent, "RUN HISTORY", side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 6))
-        columns = ("division", "attempt", "time_s", "result")
+        columns = ("division", "attempt", "time_s", "result", "track", "note")
         self.history = ttk.Treeview(panel, columns=columns, show="headings", height=2,
                                     takefocus=0)
         for column in columns:
             self.history.heading(column, text=column)
-            self.history.column(column, width=100)
+            self.history.column(column, width=300 if column == "note" else 100)
         self.history.pack(fill=tk.X, pady=(4, 4))
         self._button(panel.header, "Change log file", self.choose_log_file).pack(side=tk.RIGHT)
         self.log_label = ttk.Label(panel.header, text=f"Logging to {self.log_path}",
@@ -634,25 +670,42 @@ class RoverGUI:
         self.log_label.pack(side=tk.RIGHT, padx=10)
 
     def _bind_keys(self):
-        self.root.bind_all("<space>", lambda e: self.toggle_run())
-        self.root.bind_all("<Escape>", lambda e: self.stop_run())
-        self.root.bind_all("<Up>", lambda e: self.change_speed(SPEED_STEP))
-        self.root.bind_all("<Down>", lambda e: self.change_speed(-SPEED_STEP))
-        self.root.bind_all("<KeyPress-c>", lambda e: self.calibrate())
-        self.root.bind_all("<KeyPress-C>", lambda e: self.calibrate())
-        self.root.bind_all("<KeyPress-t>", lambda e: self.cycle_controller())
-        self.root.bind_all("<KeyPress-T>", lambda e: self.cycle_controller())
+        bind = self._bind_hotkey
+        bind("<space>", self.toggle_run)
+        self.root.bind_all("<Escape>", self._on_escape)    # Works while typing too
+        bind("<Up>", lambda: self.change_speed(SPEED_STEP))
+        bind("<Down>", lambda: self.change_speed(-SPEED_STEP))
+        bind("<KeyPress-c>", self.calibrate)
+        bind("<KeyPress-C>", self.calibrate)
+        bind("<KeyPress-t>", self.cycle_controller)
+        bind("<KeyPress-T>", self.cycle_controller)
         for slot, (up_key, down_key) in enumerate(TUNING_KEYS):
             for key, direction in ((up_key, +1), (down_key, -1)):
                 for variant in (key, key.upper()):
-                    self.root.bind_all(f"<KeyPress-{variant}>",
-                                       lambda e, s=slot, d=direction: self.tune_slot(s, d))
+                    bind(f"<KeyPress-{variant}>", lambda s=slot, d=direction: self.tune_slot(s, d))
         for key, mode in MODE_KEYS.items():
-            self.root.bind_all(key, lambda e, m=mode: self.select_mode(m))
+            bind(key, lambda m=mode: self.select_mode(m))
         for key, action in (("y", lambda: self.rate_run(True)), ("n", lambda: self.rate_run(False)),
                             ("g", self.suggest_settings), ("b", self.apply_best_settings)):
             for variant in (key, key.upper()):
-                self.root.bind_all(f"<KeyPress-{variant}>", lambda e, a=action: a())
+                bind(f"<KeyPress-{variant}>", action)
+
+    def _typing(self):
+        """True while a text box (the note, or a pairing field) has the cursor.
+        The port list is a Combobox (an Entry too) but is not typed into."""
+        try:
+            widget = self.root.focus_get()
+        except KeyError:               # Focus is in a combobox drop-down
+            return False
+        return isinstance(widget, (tk.Entry, ttk.Entry)) and not isinstance(widget, ttk.Combobox)
+
+    def _bind_hotkey(self, sequence, action):
+        """A window-wide hotkey that does nothing while the note box has the cursor."""
+        self.root.bind_all(sequence, lambda _event: None if self._typing() else action())
+
+    def _on_escape(self, _event):
+        self.stop_run()
+        self.root.focus_set()          # Leave the note box, so the hotkeys work again
 
     # ================================================================
     # Connection
@@ -701,7 +754,7 @@ class RoverGUI:
         self.pwm_window = PwmWindow(self)
 
     def _pwm_path(self):
-        return os.path.join(os.path.dirname(self.log_path), PWM_FILE)
+        return os.path.join(SETTINGS_DIR, PWM_FILE)
 
     def _load_saved_pwm(self):
         try:
@@ -776,11 +829,36 @@ class RoverGUI:
         if self.link.send(p.CMD_START):
             self.run_start = time.monotonic()
             self.run_mode = mode
+            self.run_track = self.track_name.get()
             self._open_sample_log(mode)
 
     def stop_run(self):
         self.link.send(p.CMD_STOP)
         self._finish_run("stopped by operator")
+
+    def select_track(self):
+        """Allowed only while stopped: a run keeps the track it started on."""
+        if self.run_start is not None:
+            self.track_name.set(self.run_track)
+            return
+        self._save_session()
+
+    def _session_path(self):
+        return os.path.join(SETTINGS_DIR, SESSION_FILE)
+
+    def _load_session(self):
+        try:
+            with open(self._session_path(), encoding="utf-8") as session_file:
+                return json.load(session_file)
+        except (OSError, ValueError):
+            return {}
+
+    def _save_session(self):
+        try:
+            with open(self._session_path(), "w", encoding="utf-8") as session_file:
+                json.dump({"track": self.track_name.get()}, session_file, indent=2)
+        except OSError as error:
+            self.log_label.config(text=f"Could not save {SESSION_FILE}: {error}")
 
     def select_mode(self, mode):
         if self.rover_running():
@@ -847,19 +925,66 @@ class RoverGUI:
         self._close_sample_log()
         self.attempts[mode] += 1
         row = [datetime.now().strftime("%Y-%m-%d"), p.MODE_NAMES[mode],
-               self.attempts[mode], f"{elapsed:.3f}", result, self._tuning_note()]
-        self.history.insert("", 0, values=row[1:5])
+               self.attempts[mode], f"{elapsed:.3f}", result, self._tuning_note(),
+               self.run_track, ""]
+        self.last_history_item = self.history.insert("", 0, values=row[1:5] + row[6:])
         self.timer_label.config(text=f"{elapsed:.3f} s")
         self._hold_for_rating(mode, elapsed, result)
         try:
+            self._upgrade_log_header()
             new_file = not os.path.exists(self.log_path)
             with open(self.log_path, "a", newline="") as log_file:
                 writer = csv.writer(log_file)
                 if new_file:
                     writer.writerow(RUN_LOG_HEADER)
                 writer.writerow(row)
+            self.last_log_row = [str(value) for value in row]
         except OSError as error:
             self.log_label.config(text=f"Log write failed: {error}")
+
+    def _read_log(self):
+        with open(self.log_path, newline="") as log_file:
+            return list(csv.reader(log_file))
+
+    def _write_log(self, rows):
+        with open(self.log_path, "w", newline="") as log_file:
+            csv.writer(log_file).writerows(rows)
+
+    def _upgrade_log_header(self):
+        """Older logs lack the track and note columns: add them to the header once."""
+        if not os.path.exists(self.log_path):
+            return
+        rows = self._read_log()
+        if rows and rows[0] != RUN_LOG_HEADER and rows[0] == RUN_LOG_HEADER[:len(rows[0])]:
+            rows[0] = RUN_LOG_HEADER
+            self._write_log(rows)
+
+    def save_note(self, _event=None):
+        """Writes the note box into the last run's row of the run log."""
+        note = self.note_entry.get().strip()
+        self.root.focus_set()          # Hotkeys work again
+        if not note:
+            return
+        if self.last_log_row is None:
+            self.note_hint.config(text="No run to attach the note to yet.")
+            return
+        note_column = RUN_LOG_HEADER.index("note")
+        try:
+            rows = self._read_log()
+            for row in reversed(rows):
+                if row[:note_column] == self.last_log_row[:note_column]:
+                    row[note_column:] = [note]
+                    break
+            else:
+                self.note_hint.config(text="The last run is not in the log file any more.")
+                return
+            self._write_log(rows)
+        except OSError as error:
+            self.note_hint.config(text=f"Could not save the note: {error}")
+            return
+        self.history.set(self.last_history_item, "note", note)
+        self.note_entry.delete(0, tk.END)
+        self.note_hint.config(text=f"Saved on the last run: {note}")
 
     # One CSV per run with every telemetry sample (about 20 per second), so
     # IR readings can be plotted and thresholds tuned after the run.
@@ -868,7 +993,7 @@ class RoverGUI:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         controller = p.CONTROLLER_NAMES.get(self._controller(), "")
         controller = controller.replace(" ", "").replace("/", "-")
-        name = f"ir-log_{p.MODE_NAMES[mode]}_{controller}_{stamp}.csv"
+        name = f"ir-log_{p.MODE_NAMES[mode]}_{controller}_{self.track_name.get()}_{stamp}.csv"
         self.sample_path = os.path.join(os.path.dirname(self.log_path), name)
         try:
             self.sample_file = open(self.sample_path, "w", newline="")
@@ -901,7 +1026,7 @@ class RoverGUI:
     # Lap optimiser (see optimizer.py)
     # ================================================================
     def _optimiser_path(self):
-        return os.path.join(os.path.dirname(self.log_path), OPTIMISER_FILE)
+        return os.path.join(SETTINGS_DIR, OPTIMISER_FILE)
 
     def _load_rated_runs(self):
         try:
@@ -921,10 +1046,17 @@ class RoverGUI:
 
     def _current_settings(self, controller):
         """The settings the rover is using now, in optimizer.py's keys."""
-        settings = {"speed": self.telemetry.speed}
+        settings = {}
+        levels = self.pwm_levels()
         for dimension in opt.SEARCH_SPACE[controller]:
-            if dimension.key != "speed":
-                settings[dimension.key] = self._tuning_value(dimension.key)
+            key = dimension.key
+            if key == "speed":
+                settings[key] = self.telemetry.speed
+            elif key in opt.PWM_PAIRS:
+                left, right = opt.PWM_PAIRS[key]
+                settings[key] = round((levels[left] + levels[right]) / 2)
+            else:
+                settings[key] = self._tuning_value(key)
         return settings
 
     def _hold_for_rating(self, mode, elapsed, result):
@@ -939,7 +1071,8 @@ class RoverGUI:
                             "mode": p.MODE_NAMES[mode],
                             "controller": p.CONTROLLER_NAMES[controller],
                             "settings": self._current_settings(controller),
-                            "time_s": round(elapsed, 3), "result": result}
+                            "time_s": round(elapsed, 3), "result": result,
+                            "track": self.run_track}
 
     def rate_run(self, clean):
         """clean: True = valid lap, False = failed, None = do not count it."""
@@ -970,13 +1103,18 @@ class RoverGUI:
         runs = [opt.Run(run["settings"], run["time_s"], run["clean"])
                 for run in self._load_rated_runs()
                 if run.get("mode") == p.MODE_NAMES[self.tuning.mode]
-                and run.get("controller") == p.CONTROLLER_NAMES[controller]]
+                and run.get("controller") == p.CONTROLLER_NAMES[controller]
+                and run.get("track", TRACKS[0]) == self.track_name.get()]   # Old = Test
         return opt.LapOptimiser(controller, runs), runs
 
     def _send_settings(self, settings):
+        pwm_commands = {field: command for field, command, _label in p.PWM_LEVELS}
         for key, value in settings.items():
             if key == "speed":
                 self.link.send(p.CMD_SET_SPEED, round(value))
+            elif key in opt.PWM_PAIRS:
+                for field in opt.PWM_PAIRS[key]:
+                    self.set_pwm_level(field, pwm_commands[field], value)
             else:
                 self._send_tuning(self._param(key), value)
 
@@ -1234,7 +1372,7 @@ class RoverGUI:
         return ", ".join(parts)
 
     def _tuning_path(self):
-        return os.path.join(os.path.dirname(self.log_path), TUNING_FILE)
+        return os.path.join(SETTINGS_DIR, TUNING_FILE)
 
     def _load_saved_tuning(self):
         try:
@@ -1287,7 +1425,8 @@ class RoverGUI:
         text = (f"// {p.MODE_NAMES[self.tuning.mode]}: {controller}, base {self.telemetry.speed}, "
                 f"kp {v('kp'):.0f}f, ki {v('ki'):.0f}f, kd {v('kd'):.1f}f, "
                 f"gain {v('adapt_gain'):.1f}f, ramp {v('adapt_ramp'):.0f}f, "
-                f"maxTurn {v('max_turn'):.0f}, bang {v('bang_level'):.2f}f")
+                f"maxTurn {v('max_turn'):.0f}, bang {v('bang_level'):.2f}f, "
+                f"strL strR corL corR {' '.join(str(level) for level in self.pwm_levels().values())}")
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self.tuning_status.config(text="Copied - paste into MODE_TUNING in config.h")
@@ -1392,6 +1531,9 @@ class RoverGUI:
             return "Slide the rover slowly across the line"
         if t.running:
             return "Running - Space to stop, Esc for emergency stop, Up/Down for speed"
+        if self.unrated_run is not None:
+            return ("Rate the run: Y = clean lap, N = failed. Then click the note box,"
+                    " type, Enter")
         if not self.calibrated:
             return "Press C and sweep the rover across the line (optional for 1/0 sensors)"
         return f"Mode: {p.MODE_NAMES[t.mode]} - put the rover on the line and press Space"
@@ -1615,7 +1757,7 @@ class PairingDialog:
 
     # ---- settings file: PAN ID and both serial numbers (guide step 13) ----
     def _path(self):
-        return os.path.join(os.path.dirname(self.gui.log_path), XBEE_FILE)
+        return os.path.join(SETTINGS_DIR, XBEE_FILE)
 
     def _load(self):
         try:

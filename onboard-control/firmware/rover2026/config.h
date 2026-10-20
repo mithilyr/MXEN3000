@@ -160,7 +160,7 @@ struct ModeTuning {
 // long curves.
 constexpr ModeTuning MODE_TUNING[MODE_COUNT] = {
   // travel  defaultTurn          controller       base  search  kp     ki    kd    gain   ramp   maxTurn  bang   steer  strL strR corL corR
-  {  1,      TURN_CLOCKWISE,      CONTROLLER_BANG_BANG, 85, 30,  60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 20,      0.3f,  1,     85,  85,  65,  65 },  // Clockwise: 85 % duty, slow side drops to 65 %
+  {  1,      TURN_CLOCKWISE,      CONTROLLER_BANG_BANG, 85, 30,  60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 20,      0.3f,  1,     70,  70,  55,  55 },  // Clockwise: 70 % duty, slow side drops to 55 % (clean on the test track)
   {  1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  45,   30,     60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 60,      0.3f,  1,     70,  70,  50,  50 },  // Anticlockwise
   {  1,      TURN_CLOCKWISE,      CONTROLLER_PID,  35,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f,  1,     65,  65,  50,  50 },  // Squiggle
   { -1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  25,   25,     50.0f, 0.0f, 1.5f, 6.0f,  30.0f, 50,      0.3f,  1,     35,  35,  50,  50 },  // Reverse

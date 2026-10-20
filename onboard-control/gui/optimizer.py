@@ -42,7 +42,7 @@ EXPLORATION = 0.01          # Expected-improvement margin, in standardised units
 
 @dataclass(frozen=True)
 class Dimension:
-    key: str                # "speed" or a protocol.TUNING_PARAMS key
+    key: str                # "speed", a protocol.TUNING_PARAMS key or a PWM_PAIRS key
     low: float
     high: float
     step: float             # The rover's own resolution for this value
@@ -61,10 +61,17 @@ class Dimension:
 
 SPEED = Dimension("speed", 25, 100, 1, 0)
 MAX_TURN = Dimension("max_turn", 20, 100, 1, 0)
+# Bang-bang ignores speed, bang_level and max_turn: it only uses its four wheel
+# duties. The optimiser tunes them as two values, each sent to both wheels.
+PWM_PAIRS = {
+    "pwm_straight": ("pwm_straight_left", "pwm_straight_right"),
+    "pwm_correct": ("pwm_correct_left", "pwm_correct_right"),
+}
 SEARCH_SPACE = {
     p.CONTROLLER_PID: (SPEED, Dimension("kp", 10, 200, 1, 0), Dimension("kd", 0, 6, 0.1, 1),
                        Dimension("ki", 0, 60, 1, 0), MAX_TURN),
-    p.CONTROLLER_BANG_BANG: (SPEED, Dimension("bang_level", 0.05, 0.8, 0.01, 2), MAX_TURN),
+    p.CONTROLLER_BANG_BANG: (Dimension("pwm_straight", 55, 100, 1, 0),
+                             Dimension("pwm_correct", 40, 80, 1, 0)),
     p.CONTROLLER_ADAPTIVE: (SPEED, Dimension("adapt_gain", 1, 25, 0.1, 1),
                             Dimension("adapt_ramp", 0, 150, 1, 0), MAX_TURN),
 }
@@ -75,6 +82,14 @@ class Run:
     settings: dict          # Dimension key -> value used for the run
     time_s: float
     clean: bool             # False = failed (no valid lap)
+
+
+def allowed(settings):
+    """Bang-bang: the slow wheel must stay slower than the straight one, or the
+    rover steers away from the line."""
+    if "pwm_correct" in settings:
+        return settings["pwm_correct"] < settings["pwm_straight"]
+    return True
 
 
 def describe(settings, dimensions):
@@ -221,10 +236,14 @@ class LapOptimiser:
         step = self.step_size()
         tried = {tuple(sorted(run.settings.items())) for run in self.runs}
         best_score, best_settings = -1.0, None
+        # At least two of the rover's own steps either side, so a coarse value
+        # (a whole duty %) still has untried neighbours after the box shrinks.
+        widths = [max(step, 2 * d.step / (d.high - d.low)) for d in self.dimensions]
         for _ in range(CANDIDATES):
-            unit = [min(max(c + self.rng.uniform(-step, step), 0.0), 1.0) for c in centre]
+            unit = [min(max(c + self.rng.uniform(-w, w), 0.0), 1.0)
+                    for c, w in zip(centre, widths)]
             settings = self._from_unit(unit)
-            if tuple(sorted(settings.items())) in tried:
+            if tuple(sorted(settings.items())) in tried or not allowed(settings):
                 continue
             score = self._expected_improvement(self._to_unit(settings))
             if score > best_score:
