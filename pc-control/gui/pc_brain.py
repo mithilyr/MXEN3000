@@ -36,9 +36,20 @@ TUNING_PERIOD_S = 1.0           # Slow tuning refresh; changes are echoed at onc
 # Radio dropouts while running. The rover's own watchdog has gone neutral after
 # 0.3 s. A gap longer than LINK_LOST_S restarts the controller's memory but
 # keeps the run going when frames return; longer than LINK_GIVE_UP_S ends it.
+# A rover XBee that reset has to rejoin the Zigbee network (3-10 s), so the
+# give-up time is long enough to ride through that.
 LINK_LOST_S = 0.5
-LINK_GIVE_UP_S = 2.0
+LINK_GIVE_UP_S = 10.0
 HEALTH_WINDOW_S = 2.0           # Link health figures cover the last 2 s
+# Link test window (LinkLog): a silence this long is logged as a gap, and the
+# rover's ack standing still this long while frames arrive is a downlink stall
+# (its watchdog goes neutral at 0.3 s).
+GAP_EVENT_S = 0.2
+DOWNLINK_STALL_S = 0.4
+LINK_EVENT_LIMIT = 200
+DAMAGED_WARN_FRACTION = 0.01    # Damaged / received frames worth a warning
+SCATTERED_LOSS_FRACTION = 0.02  # Frames lost outside gaps worth a warning
+MOSTLY_LOST = 0.5               # Gap: this share of its frames lost = rover kept sending
 
 # ---- Motor output (DAC0800: 128 = 0 V, 255 = +15 V) ----
 DAC_NEUTRAL = 128
@@ -46,6 +57,11 @@ DAC_SPAN = 127
 LEFT_MOTOR_DIR = 1              # -1 if that wheel is wired the other way round
 RIGHT_MOTOR_DIR = 1
 SPEED_MAX = 100                 # Wheel speeds are % of DAC_SPAN
+# While running, each DAC code moves towards its target by at most this much per
+# motor frame. The rover applies each frame as one jump, and a big jump draws a
+# current spike that can brown out the Nano or the XBee. STOP and calibration
+# still apply at once.
+DAC_MAX_STEP = 20
 
 # ---- Sensors ----
 ADC_MAX = 1023
@@ -171,7 +187,9 @@ class Brain:
 
         self.left_percent = 0
         self.right_percent = 0
-        self.dac_left = DAC_NEUTRAL
+        self.target_left = DAC_NEUTRAL  # Codes the controller asked for
+        self.target_right = DAC_NEUTRAL
+        self.dac_left = DAC_NEUTRAL     # Codes sent, after the slew limit
         self.dac_right = DAC_NEUTRAL
 
         self.dropouts = 0               # Radio gaps ridden through
@@ -184,8 +202,14 @@ class Brain:
     def set_wheel_speeds(self, left_percent, right_percent):
         self.left_percent = clamp(round(left_percent), -SPEED_MAX, SPEED_MAX)
         self.right_percent = clamp(round(right_percent), -SPEED_MAX, SPEED_MAX)
-        self.dac_left = speed_to_dac(left_percent, LEFT_MOTOR_DIR)
-        self.dac_right = speed_to_dac(right_percent, RIGHT_MOTOR_DIR)
+        self.target_left = speed_to_dac(left_percent, LEFT_MOTOR_DIR)
+        self.target_right = speed_to_dac(right_percent, RIGHT_MOTOR_DIR)
+        if not self.running:            # STOP, calibration: no ramp
+            self.dac_left, self.dac_right = self.target_left, self.target_right
+
+    def slew_towards_targets(self):
+        self.dac_left += clamp(self.target_left - self.dac_left, -DAC_MAX_STEP, DAC_MAX_STEP)
+        self.dac_right += clamp(self.target_right - self.dac_right, -DAC_MAX_STEP, DAC_MAX_STEP)
 
     def hold_neutral(self):
         self.set_wheel_speeds(0, 0)
@@ -252,6 +276,7 @@ class Brain:
         self.correction_rate = 0.0
         self.history.clear()
         self.left_percent = self.right_percent = 0     # Bang-bang: no stale command to keep
+        self.dac_left = self.dac_right = DAC_NEUTRAL    # Where the rover's watchdog left it
 
     def stop_run(self):
         self.running = False
@@ -463,6 +488,7 @@ class Brain:
             self.update_calibration(now)
         elif self.running:
             self.update_line_follower(now, dt)
+            self.slew_towards_targets()
         return self.dac_left, self.dac_right
 
     # ---- Messages for the GUI (protocol.py Telemetry / Tuning) ----
@@ -557,6 +583,153 @@ class LinkHealth:
             stale_frames=sum(count for _, count in self.stale))
 
 
+@dataclass
+class LinkEvent:
+    time_s: float           # Seconds since connect
+    kind: str               # "gap", "restart" or "downlink"
+    length_s: float = 0.0
+    frames_lost: int = 0
+    expected: int = 0       # Frames the rover would have sent in the gap
+
+
+class LinkLog:
+    """Everything the link did since connect (or the last reset), for the Link
+    test window. Pure logic: time comes in as an argument.
+
+    - gap: no sensor frame for GAP_EVENT_S. frames_lost against expected says
+      whether the rover kept sending (lost on the radio) or its frames were
+      held up and arrived late (buffered and retried).
+    - restart: the rover's ack went back to NO_SEQ, which only happens at boot.
+    - downlink: frames kept arriving but the rover applied no new motor frame."""
+
+    def __init__(self, now):
+        self.started = now
+        self.frames = 0
+        self.lost = 0               # Seq numbers that never arrived, all causes
+        self.motor_frames = 0
+        self.events = deque(maxlen=LINK_EVENT_LIMIT)
+        self.counts = {"gap": 0, "restart": 0, "downlink": 0}
+        self.longest_gap = 0.0
+        self.gap_lost = 0           # Of self.lost, the ones inside gaps
+        self.last_frame = None
+        self.last_seq = None
+        self.last_ack = io.NO_SEQ
+        self.last_ack_change = now
+        self.acks_seen = False
+
+    def _add(self, event):
+        self.events.append(event)
+        self.counts[event.kind] += 1
+
+    def motor_sent(self):
+        self.motor_frames += 1
+
+    def sensors_received(self, frame, now):
+        since_start = now - self.started
+        restarted = self.acks_seen and frame.ack == io.NO_SEQ
+        missed = 0
+        if self.last_seq is not None and not restarted:
+            missed = (frame.seq - self.last_seq - 1) % io.SEQ_COUNT
+        self.lost += missed
+
+        gap = 0.0 if self.last_frame is None else now - self.last_frame
+        if gap > GAP_EVENT_S:
+            self.longest_gap = max(self.longest_gap, gap)
+            self.last_ack_change = now      # A gap is not also a downlink stall
+        if restarted:                       # The restart explains its own gap
+            self._add(LinkEvent(since_start, "restart", gap))
+            self.acks_seen = False
+        elif gap > GAP_EVENT_S:
+            self.gap_lost += missed
+            self._add(LinkEvent(since_start, "gap", gap, missed,
+                                max(round(gap / NOMINAL_PERIOD_S) - 1, 0)))
+        if frame.ack != self.last_ack:
+            if frame.ack != io.NO_SEQ:
+                if self.acks_seen and now - self.last_ack_change > DOWNLINK_STALL_S:
+                    self._add(LinkEvent(since_start, "downlink", now - self.last_ack_change))
+                self.acks_seen = True
+            self.last_ack_change = now
+
+        self.frames += 1
+        self.last_frame = now
+        self.last_seq = frame.seq
+        self.last_ack = frame.ack
+
+    def silence(self, now):
+        """Seconds since the last sensor frame (since connect if none yet)."""
+        return now - (self.last_frame if self.last_frame is not None else self.started)
+
+
+def gap_was_radio_loss(event):
+    """True: the rover kept sending through the gap and the frames were lost."""
+    return event.expected > 0 and event.frames_lost >= MOSTLY_LOST * event.expected
+
+
+def describe_event(event):
+    if event.kind == "restart":
+        return (f"Rover Nano restarted (power dip, brownout or reset), "
+                f"no data for {event.length_s:.1f} s")
+    if event.kind == "downlink":
+        return f"Rover applied no new motor frame for {event.length_s:.1f} s (PC -> rover)"
+    if gap_was_radio_loss(event):
+        return (f"No data for {event.length_s:.1f} s: rover kept sending, "
+                f"{event.frames_lost}/{event.expected} frames lost on the radio")
+    return (f"No data for {event.length_s:.1f} s: frames held up, then arrived late "
+            f"({event.frames_lost}/{event.expected} lost)")
+
+
+def diagnose(log, damaged, now):
+    """Plain-English findings, worst first: a list of (level, text), with level
+    "bad", "warn" or "ok"."""
+    findings = []
+    if log.frames == 0:
+        if log.silence(now) > 1.0:
+            findings.append(("bad", "Nothing received from the rover. Check: rover switched on, "
+                                    "DIP switch S6 on, this is the PC XBee's COM port, "
+                                    "both XBees paired (Pair XBees), rover_io.ino uploaded."))
+        return findings
+    silent = log.silence(now)
+    if silent > GAP_EVENT_S:
+        findings.append(("bad", f"No data right now ({silent:.1f} s)."))
+    if log.counts["restart"]:
+        findings.append(("bad", f"The rover's Nano restarted {log.counts['restart']} time(s): "
+                                "its supply dips. Check the battery, the 5 V regulator and "
+                                "the wiring; add a large capacitor (470-1000 uF) on the Nano "
+                                "supply, or power the Nano and XBee separately."))
+    gaps = [event for event in log.events if event.kind == "gap"]
+    lost_gaps = [event for event in gaps if gap_was_radio_loss(event)]
+    late_gaps = [event for event in gaps if not gap_was_radio_loss(event)]
+    if lost_gaps:
+        findings.append(("bad", f"{len(lost_gaps)} gap(s) where the rover kept sending but "
+                                "the frames never reached the PC (longest "
+                                f"{max(e.length_s for e in lost_gaps):.1f} s). The radio "
+                                "path drops out: rover XBee supply (3.3 V, PL/PM), antenna "
+                                "near the motors or battery, range, or a busy channel."))
+    if late_gaps:
+        findings.append(("warn", f"{len(late_gaps)} gap(s) where the rover's frames were held "
+                                 "up and arrived late in a burst (longest "
+                                 f"{max(e.length_s for e in late_gaps):.1f} s). The XBee was "
+                                 "retrying or re-routing: weak signal, or Zigbee route repair "
+                                 "(802.15.4 firmware has no routing to repair)."))
+    if log.counts["downlink"]:
+        findings.append(("bad", f"The rover stopped receiving motor frames "
+                                f"{log.counts['downlink']} time(s) while its own frames got "
+                                "through: the PC -> rover direction drops out."))
+    if damaged > DAMAGED_WARN_FRACTION * log.frames:
+        findings.append(("warn", f"{damaged} damaged frame(s) ({100 * damaged / log.frames:.1f} % "
+                                 "of received). Bytes are lost or corrupted on a wire: Nano "
+                                 "TX -> XBee DIN (level shifter, S6), a full XBee buffer "
+                                 "during retries, or a USB cable left in the Nano with S6 on."))
+    scattered = log.lost - log.gap_lost
+    if scattered > SCATTERED_LOSS_FRACTION * (log.frames + log.lost):
+        findings.append(("warn", f"{scattered} frame(s) lost one at a time "
+                                 f"({100 * scattered / (log.frames + log.lost):.1f} %): "
+                                 "weak signal or interference."))
+    if not findings:
+        findings.append(("ok", f"Link healthy: {log.frames} frames, no gaps, no restarts."))
+    return findings
+
+
 class PcBrainLink:
     """The GUI's link: the controller runs here, on the PC."""
 
@@ -573,6 +746,7 @@ class PcBrainLink:
         self.tuning_dirty = True
         self.motor_seq = 0
         self.link_health = LinkHealth()
+        self.link_log = LinkLog(time.perf_counter())
         self.sent_dacs = None           # Last DAC codes written to the radio
         self.sent_time = 0.0
 
@@ -585,6 +759,7 @@ class PcBrainLink:
         self.port.timeout = READ_WAKE_TIMEOUT_S
         self.parser = io.SensorParser()
         self.link_health = LinkHealth()
+        self.link_log = LinkLog(time.perf_counter())
         self.brain.dropouts = 0
         self.sent_dacs = None
         self.tuning_dirty = True
@@ -630,6 +805,7 @@ class PcBrainLink:
         self.sent_dacs = dacs
         self.sent_time = now
         self.link_health.motor_sent(self.motor_seq, now)
+        self.link_log.motor_sent()
         return True
 
     def _read_loop(self):
@@ -653,6 +829,7 @@ class PcBrainLink:
         with self.lock:
             for each in frames:
                 self.link_health.sensors_received(each, now)
+                self.link_log.sensors_received(each, now)
             self.link_health.stale_skipped(len(frames) - 1, now)
             self.brain.step(frame.ir_left, frame.ir_right, now)
             self._send_motors(now)
@@ -664,6 +841,19 @@ class PcBrainLink:
                 self.tuning_dirty = False
                 self.last_tuning = now
                 self.messages.put(self.brain.tuning_message())
+
+    def link_report(self):
+        """(LinkLog, damaged frames, findings, now) for the Link test window. The
+        log is the live object, only to be read for display."""
+        with self.lock:
+            now = time.perf_counter()
+            damaged = self.parser.checksum_errors
+            return self.link_log, damaged, diagnose(self.link_log, damaged, now), now
+
+    def reset_link_log(self):
+        with self.lock:
+            self.link_log = LinkLog(time.perf_counter())
+            self.parser.checksum_errors = 0
 
     def health(self):
         """Link health for the GUI (safe from the GUI thread)."""

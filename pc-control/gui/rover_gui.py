@@ -42,7 +42,7 @@ import glass
 import optimizer as opt
 import protocol as p
 import xbee_setup as xb
-from pc_brain import PcBrainLink
+from pc_brain import NOMINAL_PERIOD_S, PcBrainLink
 
 # ---- Link ----
 BAUD_RATE = xb.LINK_BAUD       # 38400 (Pairing Guide step 15) = LINK_BAUD in rover_io.ino
@@ -587,9 +587,12 @@ class RoverGUI:
                          text=f"DAC {t.dac_left} / {t.dac_right}")
 
         health = self.link.health()
+        expected_hz = 1 / NOMINAL_PERIOD_S
+        good_hz, bad_hz = 0.875 * expected_hz, 0.625 * expected_hz     # 35 / 25 Hz at 40 Hz
+        period_ms = round(NOMINAL_PERIOD_S * 1000)
         rows = {
             "Control rate": (f"{health.rate_hz:.0f} Hz",
-                             self._health_colour(health.rate_hz, 35, 25, higher_is_better=True)),
+                             self._health_colour(health.rate_hz, good_hz, bad_hz, higher_is_better=True)),
             "Radio round trip": (f"{health.round_trip_ms:.0f} ms (max {health.round_trip_max_ms:.0f})",
                                  self._health_colour(health.round_trip_ms, 60, 100)),
             "Lost frames": (f"{health.lost_frames} in 2 s",
@@ -601,14 +604,14 @@ class RoverGUI:
         }
         for key, (text, colour) in rows.items():
             self._set_widget(self.health_labels[key], text=text, foreground=colour)
-        if health.lost_frames == 0 and health.round_trip_ms <= 60 and health.rate_hz >= 35:
-            verdict = "Loop healthy. If it stays like this, SENSOR_PERIOD_MS 20 can be tried."
-        elif health.lost_frames > 2 or health.rate_hz < 25:
-            verdict = "Radio is dropping frames: keep 25 ms, check the XBee range and pairing."
+        if health.lost_frames == 0 and health.round_trip_ms <= 60 and health.rate_hz >= good_hz:
+            verdict = f"Loop healthy at SENSOR_PERIOD_MS {period_ms}."
+        elif health.lost_frames > 2 or health.rate_hz < bad_hz:
+            verdict = f"Radio is dropping frames: keep {period_ms} ms, check the XBee range and pairing."
         elif health.stale_frames > 4:
-            verdict = "Frames arrive bunched up (radio congested): keep SENSOR_PERIOD_MS at 25."
+            verdict = f"Frames arrive bunched up (radio congested): keep SENSOR_PERIOD_MS at {period_ms}."
         else:
-            verdict = "Loop OK but slow: keep SENSOR_PERIOD_MS at 25."
+            verdict = f"Loop OK but slow: keep SENSOR_PERIOD_MS at {period_ms}."
         self._set_widget(self.health_verdict, text=verdict)
 
     def _build_level_bars(self, panel):
@@ -872,7 +875,8 @@ class RoverGUI:
 
     def start_run(self):
         if not self.link_alive():
-            self.detail_label.config(text="No telemetry from rover - check XBee link")
+            # _set_widget keeps the cache in step, so the next refresh can clear it
+            self._set_widget(self.detail_label, text="No telemetry from rover - check XBee link")
             return
         mode = self.selected_mode.get()
         if self.telemetry.mode != mode:
@@ -1665,7 +1669,7 @@ class PwmWindow:
                      highlightthickness=0, troughcolor=COLOUR_BORDER, activebackground=COLOUR_ACCENT,
                      takefocus=0,
                      command=lambda _v, f=field, c=command: self._moved(f, c)).pack(side=tk.LEFT)
-            value = ttk.Label(row, text="--", style="Panel.TLabel", width=26,
+            value = ttk.Label(row, text="--", style="Panel.TLabel", width=31,
                               font=(FONT_FAMILY, 11, "bold"))
             value.pack(side=tk.LEFT, padx=8)
             self.value_labels[field] = value

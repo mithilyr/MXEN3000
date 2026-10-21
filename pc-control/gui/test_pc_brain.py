@@ -52,6 +52,59 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(health.snapshot(0.025).lost_frames, 0)
 
 
+class LinkLogTests(unittest.TestCase):
+    PERIOD = pb.NOMINAL_PERIOD_S
+
+    def feed(self, log, count, start_seq=0, ack=5, t=0.0):
+        for i in range(count):
+            t += self.PERIOD
+            log.sensors_received(io.SensorFrame(0, 0, 128, 128, seq=(start_seq + i) % io.SEQ_COUNT,
+                                                ack=ack + i), t)
+        return t
+
+    def test_healthy(self):
+        log = pb.LinkLog(0.0)
+        t = self.feed(log, 40)
+        self.assertEqual(log.counts, {"gap": 0, "restart": 0, "downlink": 0})
+        self.assertEqual(pb.diagnose(log, 0, t)[0][0], "ok")
+
+    def test_gap_with_frames_lost_is_radio_loss(self):
+        log = pb.LinkLog(0.0)
+        t = self.feed(log, 10)
+        t = self.feed(log, 5, start_seq=10 + 39, ack=60, t=t + 1.0)   # 1 s, 39 frames missing
+        gap = log.events[0]
+        self.assertEqual(gap.kind, "gap")
+        self.assertTrue(pb.gap_was_radio_loss(gap))
+        self.assertIn("kept sending", pb.describe_event(gap))
+
+    def test_gap_without_loss_is_late_delivery(self):
+        log = pb.LinkLog(0.0)
+        t = self.feed(log, 10)
+        self.feed(log, 5, start_seq=10, ack=60, t=t + 1.0)
+        self.assertFalse(pb.gap_was_radio_loss(log.events[0]))
+
+    def test_restart_detected(self):
+        log = pb.LinkLog(0.0)
+        t = self.feed(log, 10)
+        t += 1.0
+        log.sensors_received(io.SensorFrame(0, 0, 128, 128, seq=0, ack=io.NO_SEQ), t)
+        self.assertEqual(log.counts["restart"], 1)
+        self.assertEqual(pb.diagnose(log, 0, t)[0][0], "bad")
+
+    def test_downlink_stall(self):
+        log = pb.LinkLog(0.0)
+        t = self.feed(log, 10)
+        for i in range(30):                         # 0.75 s, ack stuck
+            t += self.PERIOD
+            log.sensors_received(io.SensorFrame(0, 0, 128, 128, seq=10 + i, ack=14), t)
+        log.sensors_received(io.SensorFrame(0, 0, 128, 128, seq=40, ack=20), t + self.PERIOD)
+        self.assertEqual(log.counts["downlink"], 1)
+
+    def test_nothing_received(self):
+        log = pb.LinkLog(0.0)
+        self.assertIn("Nothing received", pb.diagnose(log, 0, 2.0)[0][1])
+
+
 class BrainTests(unittest.TestCase):
     def setUp(self):
         self.brain = pb.Brain()
@@ -60,6 +113,12 @@ class BrainTests(unittest.TestCase):
     def step(self, left, right):
         self.t += pb.NOMINAL_PERIOD_S
         return self.brain.step(left, right, self.t)
+
+    def settle(self, left, right, steps=10):
+        """Steps long enough for the slew limit to reach the target codes."""
+        for _ in range(steps):
+            dacs = self.step(left, right)
+        return dacs
 
     def start(self, mode, controller):
         self.brain.handle_command(p.CMD_SET_MODE, mode, self.t)
@@ -74,16 +133,16 @@ class BrainTests(unittest.TestCase):
         self.start(p.MODE_CLOCKWISE, p.CONTROLLER_BANG_BANG)
         tuning = self.brain.tuning[p.MODE_CLOCKWISE]
         straight = pb.speed_to_dac(pb.duty_to_speed(tuning.pwm_straight_left), 1)
-        self.assertEqual(self.step(GREY, GREY), (straight, straight))
+        self.assertEqual(self.settle(GREY, GREY), (straight, straight))
         # Right sensor on black: the left wheel slows, so the rover turns left.
-        left, right = self.step(GREY, BLACK)
+        left, right = self.settle(GREY, BLACK)
         self.assertLess(left, right)
 
     def test_pid_steers_towards_line(self):
         self.start(p.MODE_ANTICLOCKWISE, p.CONTROLLER_PID)
-        left, right = self.step(WHITE + 100, BLACK - 100)   # Line to the left
+        left, right = self.settle(WHITE + 100, BLACK - 100)   # Line to the left
         self.assertLess(left, right)
-        left, right = self.step(BLACK - 100, WHITE + 100)   # Line to the right
+        left, right = self.settle(BLACK - 100, WHITE + 100)   # Line to the right
         self.assertGreater(left, right)
 
     def test_lost_line_backtracks_then_spins(self):
@@ -97,6 +156,29 @@ class BrainTests(unittest.TestCase):
         for _ in range(10):
             self.step(BLACK, BLACK)
         self.assertEqual(self.brain.left_percent, -self.brain.right_percent)  # Spinning
+
+    def test_slew_limits_each_step(self):
+        self.start(p.MODE_CLOCKWISE, p.CONTROLLER_BANG_BANG)
+        previous = (128, 128)
+        for _ in range(10):
+            dacs = self.step(GREY, BLACK)
+            for before, after in zip(previous, dacs):
+                self.assertLessEqual(abs(after - before), pb.DAC_MAX_STEP)
+            previous = dacs
+        self.assertEqual(dacs, (self.brain.target_left, self.brain.target_right))
+
+    def test_stop_skips_slew(self):
+        self.start(p.MODE_CLOCKWISE, p.CONTROLLER_BANG_BANG)
+        self.settle(GREY, GREY)
+        self.brain.handle_command(p.CMD_STOP, 0, self.t)
+        self.assertEqual((self.brain.dac_left, self.brain.dac_right), (128, 128))
+
+    def test_ramps_up_from_neutral_after_dropout(self):
+        self.start(p.MODE_CLOCKWISE, p.CONTROLLER_BANG_BANG)
+        self.settle(GREY, GREY)
+        self.t += pb.LINK_LOST_S + 0.1
+        left, _ = self.brain.step(GREY, GREY, self.t)
+        self.assertEqual(left, 128 + pb.DAC_MAX_STEP)
 
     def test_stop_is_neutral(self):
         self.start(p.MODE_CLOCKWISE, p.CONTROLLER_BANG_BANG)

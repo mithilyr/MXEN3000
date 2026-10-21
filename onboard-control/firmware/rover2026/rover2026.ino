@@ -76,6 +76,14 @@ byte historyCount = 0;
 unsigned long lastHistoryMs = 0;
 unsigned long nextBacktrackMs = 0;
 
+// ---- Corner search: line lost straight from both sensors on white ----
+bool lineWasCentred = false;                // Both sensors were on white last step
+unsigned long lastSideMs = 0;               // Last time one sensor alone saw the line
+bool cornerSearch = false;                  // This loss is a corner: sweep, no backtrack
+unsigned long searchStartMs = 0;
+int searchDir = TURN_CLOCKWISE;             // Direction of the latest search spin
+unsigned long cornerFoundMs = 0;            // When a corner search last found the line
+
 // ---- Timers ----
 unsigned long lastControlMs = 0;
 unsigned long lastTelemetryMs = 0;
@@ -184,6 +192,7 @@ void startRun() {
   running = true;
   clearHistory();
   lineLost = false;
+  lineWasCentred = false;
   lastTurn = liveTuning[mode].defaultTurn;
   lastPosition = position;
   integral = 0.0f;
@@ -220,18 +229,35 @@ void setController(byte newController) {
 // ============================================================
 // Line follower (spin search when lost, then one of three controllers)
 // ============================================================
+// Corner search spin direction: lastTurn for SWEEP_MS, then back and forth
+// across the heading the line was lost on, 2 x SWEEP_MS each way.
+int sweepDirection(unsigned long elapsedMs) {
+  if (elapsedMs < SWEEP_MS) return lastTurn;
+  bool firstReturn = ((elapsedMs - SWEEP_MS) / (2 * SWEEP_MS)) % 2 == 0;
+  return firstReturn ? -lastTurn : lastTurn;
+}
+
 // While lineMissing, first retraces the last wheel commands in reverse, then
 // spins towards the side the line was last seen on, until the line is found or
 // the run is stopped. Returns true when it is handling a lost line, so the
 // caller must not steer.
+// Exception, a sharp corner: both sensors go from white to black at once, or
+// one goes black only a moment (CORNER_WINDOW_MS) before the other.
+// Backtracking would only find the line before the corner and drive into it
+// again, so the rover stays put and sweeps, starting towards lastTurn (the
+// side whose sensor stayed white longest, when there is one).
 bool searchIfLineLost(bool lineMissing, unsigned long now, const ModeTuning& tuning) {
   if (!lineMissing) {
+    if (lineLost && cornerSearch) cornerFoundMs = now;
     lineLost = false;
     return false;
   }
   if (!lineLost) {
     lineLost = true;
     nextBacktrackMs = now;
+    searchStartMs = now;
+    cornerSearch = lineWasCentred || now - lastSideMs < CORNER_WINDOW_MS;
+    if (cornerSearch) clearHistory();
   }
   if (historyCount > 0) {
     // Backtrack: undo the newest recorded command, one sample at a time.
@@ -243,7 +269,8 @@ bool searchIfLineLost(bool lineMissing, unsigned long now, const ModeTuning& tun
     }
     return true;
   }
-  int spin = lastTurn * tuning.searchSpeed;
+  searchDir = cornerSearch ? sweepDirection(now - searchStartMs) : lastTurn;
+  int spin = searchDir * tuning.searchSpeed;
   setWheelSpeeds(spin, -spin);
   return true;
 }
@@ -307,22 +334,41 @@ bool analogLineLost(unsigned long now, const ModeTuning& tuning) {
                      normLevel[SENSOR_RIGHT] > LOST_LEVEL;
   if (searchIfLineLost(bothOnBlack, now, tuning)) return true;
 
+  lineWasCentred = normLevel[SENSOR_LEFT] < WHITE_BELOW && normLevel[SENSOR_RIGHT] < WHITE_BELOW;
   if (position > SIDE_MEMORY_LEVEL) {
     lastTurn = TURN_ANTICLOCKWISE;
+    lastSideMs = now;
   } else if (position < -SIDE_MEMORY_LEVEL) {
     lastTurn = TURN_CLOCKWISE;
+    lastSideMs = now;
   }
   return false;
 }
 
-// turn > 0 rotates the rover clockwise.
+// turn > 0 rotates the rover clockwise. Right (clockwise) turns are scaled,
+// limit included, by RIGHT_TURN_GAIN to even out a rover that turns right weaker.
 void driveWithTurn(const ModeTuning& tuning, float turn) {
-  turn = constrain(turn, -tuning.maxTurn, tuning.maxTurn);
+  const float rightGain = RIGHT_TURN_GAIN[mode];
+  if (turn > 0.0f) turn *= rightGain;
+  turn = constrain(turn, -tuning.maxTurn, tuning.maxTurn * rightGain);
   int forward = tuning.travelDir * baseSpeed;
   setWheelSpeeds(forward + turn, forward - turn);
 }
 
-// PID on the difference of the two normalised readings.
+// Turns a position reading into the rover's real sideways offset from the line
+// centre, using the sensor geometry in config.h, scaled so +-1 = SENSOR_RANGE_CM.
+// position climbs twice as fast while both sensors see the line (inner range)
+// as once one is fully white (outer range); this straightens that out.
+float lineOffset(float pos) {
+  const float innerEnd = 1.0f - 2.0f * SENSOR_GAP_CM / SENSOR_SPOT_CM;  // position where the inner range ends
+  float size = fabs(pos);
+  float cm = size <= innerEnd
+                 ? size * SENSOR_SPOT_CM / 2.0f
+                 : (SENSOR_SPOT_CM / 2.0f - SENSOR_GAP_CM) + (size - innerEnd) * SENSOR_SPOT_CM;
+  return copysign(cm / SENSOR_RANGE_CM, pos);
+}
+
+// PID on the sideways offset, worked out from the two normalised readings.
 void updatePid(unsigned long now) {
   const ModeTuning& tuning = liveTuning[mode];
   if (analogLineLost(now, tuning)) {
@@ -331,22 +377,33 @@ void updatePid(unsigned long now) {
     return;
   }
 
+  // Corner hold: just after a corner search finds the line, both sensors read
+  // white (position 0), so plain PID would drive straight off the bend again
+  // and the rover would stutter round it in small spins. Instead it keeps
+  // arcing the way it was spinning until one sensor alone sees the line.
+  bool bothWhite = normLevel[SENSOR_LEFT] < WHITE_BELOW && normLevel[SENSOR_RIGHT] < WHITE_BELOW;
+  if (bothWhite && now - cornerFoundMs < CORNER_HOLD_MS[mode]) {
+    driveWithTurn(tuning, searchDir * CORNER_HOLD_TURN * tuning.maxTurn);
+    return;
+  }
+
   const float periodSeconds = CONTROL_PERIOD_MS / 1000.0f;
-  float derivative = (position - lastPosition) / periodSeconds;
+  float error = lineOffset(position);
+  float derivative = (error - lineOffset(lastPosition)) / periodSeconds;
   filteredDerivative += D_FILTER_ALPHA * (derivative - filteredDerivative);
 
   // Anti-windup: the integral term on its own can never ask for more than
   // maxTurn, so it cannot keep growing while the steering is clamped.
   if (tuning.ki > 0.0f) {
     float integralLimit = tuning.maxTurn / tuning.ki;
-    integral = constrain(integral + position * periodSeconds, -integralLimit, integralLimit);
+    integral = constrain(integral + error * periodSeconds, -integralLimit, integralLimit);
   } else {
     integral = 0.0f;
   }
 
-  // A positive position (line to the left) needs an anticlockwise
+  // A positive error (line to the left) needs an anticlockwise
   // correction, hence the minus sign.
-  float turn = -tuning.steerSign * (tuning.kp * position + tuning.ki * integral +
+  float turn = -tuning.steerSign * (tuning.kp * error + tuning.ki * integral +
                                     tuning.kd * filteredDerivative);
   driveWithTurn(tuning, turn);
 }
@@ -364,7 +421,8 @@ int dutyToSpeed(int duty) {
 // steers back onto the line. Between WHITE_BELOW and BLACK_ABOVE a sensor
 // counts as still on the line. steerSign = -1 swaps the sides if this steers
 // the wrong way on test. There is no lost-line search here: with both sensors
-// black the rover keeps its last wheel command (or the centred levels at the
+// black in Clockwise mode the rover turns gently right (CW_BOTH_BLACK_RIGHT_DUTY);
+// in other modes it keeps its last wheel command (or the centred levels at the
 // start of a run, before it has made one) until a sensor sees the line again.
 void updateBangBang(unsigned long now) {
   const ModeTuning& tuning = liveTuning[mode];
@@ -372,6 +430,10 @@ void updateBangBang(unsigned long now) {
 
   bool leftBlack = normLevel[SENSOR_LEFT] > BLACK_ABOVE;
   bool rightBlack = normLevel[SENSOR_RIGHT] > BLACK_ABOVE;
+  if (leftBlack && rightBlack && mode == MODE_CLOCKWISE) {
+    setWheelSpeeds(dutyToSpeed(tuning.pwmStraightLeft), dutyToSpeed(CW_BOTH_BLACK_RIGHT_DUTY));
+    return;
+  }
   if (leftBlack && rightBlack && (lastLeftPercent != 0 || lastRightPercent != 0)) return;
   if (tuning.steerSign < 0) {
     bool swap = leftBlack;

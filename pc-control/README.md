@@ -5,11 +5,11 @@
 onboard nano is only there for communication and not for processing."*
 
 This folder is self-contained: its own firmware and its own GUI, with no
-imports from `../onboard-control/`. The GUI looks and works the same as
-`RoverControlMap.exe` (same keys, logs, optimiser, track map and scorecard),
-but it is easy to tell apart: **teal** accent instead of blue, the title
-"Rover 2026 — PC Control" with a **PROCESSING: PC** badge, and an extra
-**PC CONTROL LOOP** panel (see below).
+imports from `../onboard-control/`. Since 21-Oct-2026 `RoverControlPC.exe` is
+built from `rover_gui_min.py`, a black, monospace terminal-style panel with the same keys, logs, tuning, optimiser, run
+history, Pair XBees and PWM test windows, but the live display is plain numbers
+at 5 Hz (no track map, scorecard, sensor chart, level bars or PC CONTROL LOOP
+panel). The full panel is still in `rover_gui.py` / `rover_gui_map.py`.
 
 ```
 firmware/rover_io/
@@ -20,7 +20,8 @@ gui/
   io_protocol.py    radio frames to/from rover_io.ino
   protocol.py       GUI <-> controller messages (commands, telemetry, tuning)
   rover_gui.py      Tkinter control panel (keyboard driven)
-  rover_gui_map.py  the same panel plus the track map + scorecard (entry point)
+  rover_gui_min.py  terminal-style minimal panel over rover_gui.py, numbers only (entry point)
+  rover_gui_map.py  the full panel plus the track map + scorecard (no longer built)
   optimizer.py, track_model.py, map_view.py, glass.py, xbee_setup.py
   test_*.py         unit tests (python -m unittest discover)
   build_exe.bat     -> dist/RoverControlPC.exe
@@ -76,7 +77,7 @@ dozen small packets a second, so every packet saved lowers latency:
 ## Use it
 
 1. Open `firmware/rover_io/rover_io.ino` in the Arduino IDE (board Arduino Nano, ATmega328P). Switch DIP switch S6 off, upload, switch S6 back on.
-2. Run `gui/build_exe.bat`, then start `gui/dist/RoverControlPC.exe` (or `python rover_gui_map.py` from `gui/`).
+2. Run `gui/build_exe.bat`, then start `gui/dist/RoverControlPC.exe` (or `python rover_gui_min.py` from `gui/`).
 3. Connect, calibrate (C), pick a mode (1–4), Space to start, Esc to stop — as in Version A.
 4. Tune live, press **Copy for pc_brain.py**, and paste the values into `MODE_TUNING` in `gui/pc_brain.py`.
 
@@ -115,4 +116,4 @@ jump between 0 and 16 ms.
 - `python -m unittest discover` in `gui/`: 73 tests pass, including the PC controller, radio frames, link health, keepalive, newest-frame and dropout logic.
 - GUI run against a simulated rover (15 ms radio delay each way): 38 Hz control rate, 26 ms round trip (max 28), 0 lost frames, under 3 ms PC step time; Clockwise bang-bang sent 70 % / 55 % duty; Esc sent neutral at once.
 - `build_exe.bat` builds `RoverControlPC.exe` (about 32 MB). `dist/settings/xbee.json` is copied from Version A so the XBee pairing carries over.
-- `rover_io.ino` not yet compiled here (no arduino-cli on this PC) and **not yet run on the rover**.
+- `rover_io.ino` (simplified 21-Oct-2026: 4-sample IR averaging, DACs written only on change, XBee on D0/D1 only) compiles cleanly with the Arduino AVR core 1.8.8 (Nano, no warnings); not yet confirmed on the rover.
