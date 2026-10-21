@@ -1,5 +1,5 @@
 @echo off
-rem Builds dist\RoverControlMap.exe - the rover GUI plus the track-map tile.
+rem Builds dist\RoverControlMap.exe - the rover telemetry dashboard (rover_gui_map.py).
 rem RoverControl.exe (build_exe.bat) is not affected.
 rem Run from this folder: build_exe_map.bat
 cd /d "%~dp0"

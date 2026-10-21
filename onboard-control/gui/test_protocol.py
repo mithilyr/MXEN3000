@@ -19,6 +19,14 @@ def tuning_frame(mode=p.MODE_SQUIGGLE, controller=p.CONTROLLER_BANG_BANG, gain=1
     return bytes(body + [p.checksum(body)])
 
 
+def debug_frame(seq=7, state=p.STATE_FOLLOW, terms=(-20, 0, 15, -5), saturated_pct=25,
+                max_error=42, steps=20, step_max=13, period_max=56, lost=2):
+    signed = [term + p.SIGNED_OFFSET for term in terms]
+    body = [p.FRAME_START, p.MSG_DEBUG, seq, state, *signed, 0, saturated_pct, max_error,
+            steps, step_max, period_max, lost, p.DEBUG_SATURATED]
+    return bytes(body + [p.checksum(body)])
+
+
 class ProtocolTests(unittest.TestCase):
     def test_command_frame(self):
         frame = p.encode_command(p.CMD_SET_SPEED, 50)
@@ -81,6 +89,29 @@ class ProtocolTests(unittest.TestCase):
         for param in p.TUNING_PARAMS:
             data = p.encode_command(param.command, round(2 * param.step * param.scale))[2]
             self.assertLessEqual(data, p.DATA_MAX)
+
+    def test_debug_frame_decodes_signed_terms_and_timing(self):
+        [d] = p.TelemetryParser().feed(debug_frame())
+        self.assertEqual((d.seq, d.state), (7, p.STATE_FOLLOW))
+        self.assertEqual((d.p_term, d.i_term, d.d_term, d.turn), (-20, 0, 15, -5))
+        self.assertEqual((d.adapt_rate, d.saturated_pct, d.steps, d.lost_events), (0, 25, 20, 2))
+        self.assertAlmostEqual(d.max_error, 0.42)
+        self.assertAlmostEqual(d.step_max_ms, 1.3)
+        self.assertAlmostEqual(d.period_max_ms, 5.6)
+        self.assertTrue(d.saturated)
+
+    def test_calibration_frame(self):
+        body = [p.FRAME_START, p.MSG_CALIBRATION, 15, 16, 180, 175, p.CAL_REJECTED]
+        [c] = p.TelemetryParser().feed(bytes(body + [p.checksum(body)]))
+        self.assertEqual((c.white_left, c.white_right, c.black_left, c.black_right),
+                         (60, 64, 720, 700))
+        self.assertEqual(c.result, p.CAL_REJECTED)
+        self.assertAlmostEqual(p.normalised(390, 60, 720), 0.5)
+
+    def test_all_four_frame_types_in_one_stream(self):
+        stream = debug_frame() + telemetry_frame() + tuning_frame() + debug_frame(seq=8)
+        kinds = [type(m).__name__ for m in p.TelemetryParser().feed(stream)]
+        self.assertEqual(kinds, ["Debug", "Telemetry", "Tuning", "Debug"])
 
     def test_corrupt_checksum_rejected(self):
         bad = bytearray(telemetry_frame())

@@ -37,8 +37,10 @@ import serial
 from serial.tools import list_ports
 
 import glass
+import log_guide
 import optimizer as opt
 import protocol as p
+import telemetry_stats as ts
 import xbee_setup as xb
 
 # ---- Link ----
@@ -70,6 +72,7 @@ LEVEL_WHITE_MARK = 1 - DEFAULT_WHITE_LEVEL / ADC_FULL_SCALE    # 0.94
 LEVEL_BLACK_MARK = 1 - DEFAULT_BLACK_LEVEL / ADC_FULL_SCALE    # 0.30
 LEVEL_BAR_WIDTH = 260
 LEVEL_BAR_HEIGHT = 18
+LEVEL_HINT_WRAP = 640           # px, the pot calibration hint under the level bars
 FONT_FAMILY = "Segoe UI"
 GUIDE_FONT = (FONT_FAMILY, 12, "bold")
 READOUT_FONT = ("Consolas", 12)
@@ -87,8 +90,8 @@ SESSION_FILE = "session.json"   # The last selected track
 NOTE_WIDTH = 34                 # Characters
 TUNING_FILE = "tuning.json"     # In SETTINGS_DIR, one entry per mode
 PWM_FILE = "pwm_levels.json"    # Bang-bang wheel levels from the PWM test window, one entry per mode
-PWM_STEP = 5                    # Slider increment, % duty
-PWM_USER_HOLD_S = 1.5           # After a slider move, ignore the rover echo this long
+PWM_STEP = 5                    # Up/down button increment, % duty (any value can be typed)
+PWM_USER_HOLD_S = 1.5           # After a typed or stepped change, ignore the rover echo this long
 OPTIMISER_FILE = "optimizer.json"  # Every rated run
 XBEE_FILE = "xbee.json"         # Pair XBees: PAN ID and both serial numbers
 PAIR_POLL_MS = 50
@@ -101,7 +104,27 @@ TUNING_SLOTS = {
     p.CONTROLLER_ADAPTIVE: ("adapt_gain", "adapt_ramp", "max_turn"),
 }
 SAMPLE_LOG_HEADER = ["time_s", "ir_left", "ir_right", "position",
-                     "dac_left", "dac_right", "speed", "line_lost"]
+                     "dac_left", "dac_right", "speed", "line_lost",
+                     # From the debug frame sent just before each telemetry frame
+                     # (blank with firmware that has no debug frame):
+                     "state", "p_term", "i_term", "d_term", "turn", "adapt_rate",
+                     "saturated_pct", "max_error", "step_max_ms", "period_max_ms",
+                     "lost_events", "debug_seq",
+                     # Worked out on the PC (the first 8 columns stay first: TrackMap reads them)
+                     "n_left", "n_right", "left_white", "right_white", "duty_left",
+                     "duty_right", "speed_left", "speed_right", "saturated", "frame_gap_ms"]
+DEBUG_LOG_COLUMNS = 12              # state .. debug_seq above
+# Next to the run log: one row per run with everything needed to explain its lap
+# time (column meanings: logs/README-logs.md, written by log_guide.py).
+RUN_STATS_FILE = "run-stats.csv"
+RUN_STATS_HEADER = ["date", "division", "attempt", "controller", "track", "time_s",
+                    "result", *ts.RunSummary.HEADER,
+                    "checksum_errors", "rx_bytes_per_s", "commands",
+                    "mode", "base_speed", "kp", "ki", "kd", "max_turn", "bang_level",
+                    "adapt_gain", "adapt_ramp", "pwm_straight_l", "pwm_straight_r",
+                    "pwm_correct_l", "pwm_correct_r",
+                    "cal_result", "white_l", "white_r", "black_l", "black_r",
+                    "port", "pan_id", "ir_log"]
 
 # Dark glass look (see glass.py): flat near-black window, rounded dark cards.
 # Status text colours are the bright Apple-dark shades; the *_LAMP shades are
@@ -158,6 +181,15 @@ class RoverLink:
         self.messages = queue.Queue()
         self.reader = None
         self.reading = False
+        self._reset_counters()
+
+    def _reset_counters(self):
+        """Traffic since the port was opened, for the link figures."""
+        self.opened_at = time.monotonic()
+        self.rx_bytes = 0
+        self.tx_bytes = 0
+        self.commands_sent = 0
+        self.frame_counts = {}          # Message class name -> frames received
 
     @property
     def is_open(self):
@@ -166,6 +198,7 @@ class RoverLink:
     def open(self, device):
         self.port = xb.open_port(device, BAUD_RATE)     # No Arduino reset on open
         self.parser = p.TelemetryParser()
+        self._reset_counters()
         self.reading = True
         self.reader = threading.Thread(target=self._read_loop, daemon=True)
         self.reader.start()
@@ -182,7 +215,10 @@ class RoverLink:
         if not self.is_open:
             return False
         try:
-            self.port.write(p.encode_command(command, data))
+            frame = p.encode_command(command, data)
+            self.port.write(frame)
+            self.tx_bytes += len(frame)
+            self.commands_sent += 1
             return True
         except serial.SerialException:
             return False
@@ -195,8 +231,12 @@ class RoverLink:
                 self.reading = False
                 break
             if data:
+                now = time.monotonic()      # Arrival time, for the link figures
+                self.rx_bytes += len(data)
                 for message in self.parser.feed(data):
-                    self.messages.put(message)
+                    name = type(message).__name__
+                    self.frame_counts[name] = self.frame_counts.get(name, 0) + 1
+                    self.messages.put((now, message))
             else:
                 time.sleep(READ_IDLE_S)
 
@@ -208,6 +248,12 @@ class RoverGUI:
 
         self.telemetry = None
         self.telemetry_time = 0.0
+        self.debug = None               # Last Debug frame (controller insides)
+        self.debug_time = 0.0
+        self.calibration = None         # Last Calibration frame (white / black levels)
+        self.link_stats = ts.LinkStats()
+        self.run_stats = None           # RunStats of the run in progress
+        self.last_run_summary = None    # RunSummary of the last finished run
         self.telemetry_count = 0
         self.rate_window_start = time.monotonic()
         self.telemetry_rate = 0
@@ -231,6 +277,7 @@ class RoverGUI:
         self.attempts = {mode: 0 for mode in p.MODE_NAMES}
         for folder in (LOG_DIR, SETTINGS_DIR):
             os.makedirs(folder, exist_ok=True)
+        log_guide.write(LOG_DIR)
         self.log_path = os.path.join(LOG_DIR, DEFAULT_LOG_FILE)
         self.sample_file = None
         self.sample_writer = None
@@ -582,7 +629,7 @@ class RoverGUI:
             seen = ttk.Label(levels, text="", style="Muted.TLabel", font=READOUT_FONT)
             seen.grid(row=row, column=3, sticky=tk.W)
             self.level_widgets[side] = (bar, fill, value, seen)
-        ttk.Label(panel, style="Muted.TLabel", wraplength=640, justify=tk.LEFT,
+        ttk.Label(panel, style="Muted.TLabel", wraplength=LEVEL_HINT_WRAP, justify=tk.LEFT,
                   text=(f"Pot calibration: turn each sensor's pot until it reads above "
                         f"{LEVEL_WHITE_MARK:.2f} over the white line and below "
                         f"{LEVEL_BLACK_MARK:.2f} over the black table (dashed marks), with left "
@@ -734,6 +781,8 @@ class RoverGUI:
             messagebox.showerror("Could not open port", str(error))
             return
         self.level_range.clear()
+        self.link_stats = ts.LinkStats()
+        self.debug = self.calibration = None
         self.connect_button.config(text="Disconnect")
 
     def open_pairing(self):
@@ -830,6 +879,10 @@ class RoverGUI:
             self.run_start = time.monotonic()
             self.run_mode = mode
             self.run_track = self.track_name.get()
+            self.run_stats = ts.RunStats()
+            # Link counters at the start, for the run's traffic figures
+            self.run_link_start = (self.link.parser.checksum_errors, self.link.rx_bytes,
+                                   self.link.commands_sent)
             self._open_sample_log(mode)
 
     def stop_run(self):
@@ -930,6 +983,7 @@ class RoverGUI:
         self.last_history_item = self.history.insert("", 0, values=row[1:5] + row[6:])
         self.timer_label.config(text=f"{elapsed:.3f} s")
         self._hold_for_rating(mode, elapsed, result)
+        self._write_run_stats(row, elapsed, result)
         try:
             self._upgrade_log_header()
             new_file = not os.path.exists(self.log_path)
@@ -941,6 +995,78 @@ class RoverGUI:
             self.last_log_row = [str(value) for value in row]
         except OSError as error:
             self.log_label.config(text=f"Log write failed: {error}")
+
+    def _write_run_stats(self, row, elapsed, result):
+        """One row of tuning figures per run in run-stats.csv, next to the run log."""
+        if self.run_stats is None:
+            return
+        self.last_run_summary = self.run_stats.summary(elapsed)
+        self.run_stats = None
+        path = os.path.join(os.path.dirname(self.log_path), RUN_STATS_FILE)
+        stats_row = [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row[1], row[2],
+                     p.CONTROLLER_NAMES.get(self._controller(), ""), self.run_track,
+                     f"{elapsed:.3f}", result, *self.last_run_summary.row(),
+                     *self._run_link_figures(elapsed), *self._run_settings(),
+                     *self._run_calibration(), self.port_box.get().split(" - ")[0],
+                     self._load_xbee_settings().get("pan", ""),
+                     os.path.basename(self.sample_path or "")]
+        try:
+            self._retire_old_stats_file(path)
+            new_file = not os.path.exists(path)
+            with open(path, "a", newline="") as stats_file:
+                writer = csv.writer(stats_file)
+                if new_file:
+                    writer.writerow(RUN_STATS_HEADER)
+                writer.writerow(stats_row)
+        except OSError as error:
+            self.log_label.config(text=f"Run stats write failed: {error}")
+
+    def _run_link_figures(self, elapsed):
+        """Checksum errors, received bytes per second and commands during the run."""
+        errors, rx, commands = getattr(self, "run_link_start", (0, 0, 0))
+        link = self.link
+        rate = (link.rx_bytes - rx) / elapsed if elapsed > 0 else 0
+        return [link.parser.checksum_errors - errors, f"{rate:.0f}",
+                link.commands_sent - commands]
+
+    def _run_settings(self):
+        """The tuning the rover reported using (its echo), for run-stats.csv."""
+        u = self.tuning
+        if u is None or self.telemetry is None:
+            return [""] * 13
+        return [p.MODE_NAMES.get(u.mode, u.mode), self.telemetry.speed, f"{u.kp:.0f}",
+                f"{u.ki:.0f}", f"{u.kd:.1f}", u.max_turn, f"{u.bang_level:.2f}",
+                f"{u.adapt_gain:.1f}", f"{u.adapt_ramp:.0f}", u.pwm_straight_left,
+                u.pwm_straight_right, u.pwm_correct_left, u.pwm_correct_right]
+
+    def _run_calibration(self):
+        c = self.calibration
+        if c is None:
+            return [""] * 5
+        result = {p.CAL_DEFAULTS: "defaults", p.CAL_ACCEPTED: "calibrated",
+                  p.CAL_REJECTED: "rejected"}.get(c.result, c.result)
+        return [result, c.white_left, c.white_right, c.black_left, c.black_right]
+
+    @staticmethod
+    def _retire_old_stats_file(path):
+        """A run-stats.csv from an older build has other columns: rename it aside
+        so every file has one header that matches its rows."""
+        if not os.path.exists(path):
+            return
+        with open(path, newline="") as stats_file:
+            header = next(csv.reader(stats_file), None)
+        if header != RUN_STATS_HEADER:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            os.replace(path, path.replace(".csv", f"_old_{stamp}.csv"))
+
+    def _load_xbee_settings(self):
+        """PAN ID and serial numbers saved by Pair XBees (xbee.json)."""
+        try:
+            with open(os.path.join(SETTINGS_DIR, XBEE_FILE), encoding="utf-8") as saved_file:
+                saved = json.load(saved_file)
+            return saved if isinstance(saved, dict) else {}
+        except (OSError, ValueError):
+            return {}
 
     def _read_log(self):
         with open(self.log_path, newline="") as log_file:
@@ -1006,10 +1132,27 @@ class RoverGUI:
     def _log_sample(self, t):
         if self.sample_writer is None or self.run_start is None:
             return
+        d = self.debug if self.debug_alive() else None
+        debug = [""] * DEBUG_LOG_COLUMNS if d is None else [
+            p.STATE_NAMES.get(d.state, d.state), d.p_term, d.i_term, d.d_term, d.turn,
+            d.adapt_rate, d.saturated_pct, f"{d.max_error:.2f}", f"{d.step_max_ms:.1f}",
+            f"{d.period_max_ms:.1f}", d.lost_events, d.seq]
+        c = self.calibration
+        white = (c.white_left, c.white_right) if c else (DEFAULT_WHITE_LEVEL,) * 2
+        black = (c.black_left, c.black_right) if c else (DEFAULT_BLACK_LEVEL,) * 2
+        gap = self.link_stats.last_gap
         try:
             self.sample_writer.writerow([
                 f"{time.monotonic() - self.run_start:.3f}", t.ir_left, t.ir_right,
-                f"{t.position:.3f}", t.dac_left, t.dac_right, t.speed, int(t.line_lost)])
+                f"{t.position:.3f}", t.dac_left, t.dac_right, t.speed, int(t.line_lost),
+                *debug,
+                f"{p.normalised(t.ir_left, white[0], black[0]):.2f}",
+                f"{p.normalised(t.ir_right, white[1], black[1]):.2f}",
+                int(t.left_white), int(t.right_white),
+                f"{p.dac_to_percent(t.dac_left):.1f}", f"{p.dac_to_percent(t.dac_right):.1f}",
+                f"{p.dac_to_speed(t.dac_left):.0f}", f"{p.dac_to_speed(t.dac_right):.0f}",
+                "" if d is None else int(d.saturated),
+                "" if gap is None else f"{gap * 1000:.0f}"])
             self.sample_file.flush()
         except OSError as error:
             self._close_sample_log()
@@ -1224,12 +1367,7 @@ class RoverGUI:
     # Periodic UI refresh (runs on the Tk thread)
     # ================================================================
     def _refresh(self):
-        while not self.link.messages.empty():
-            message = self.link.messages.get_nowait()
-            if isinstance(message, p.Tuning):
-                self._on_tuning(message)
-            else:
-                self._on_telemetry(message)
+        self._drain_messages()
         self._update_link_label()
         self._update_run_labels()
         self._update_lamps()
@@ -1241,11 +1379,37 @@ class RoverGUI:
         self._draw_chart()
         self.root.after(UI_REFRESH_MS, self._refresh)
 
+    def _drain_messages(self):
+        while not self.link.messages.empty():
+            received, message = self.link.messages.get_nowait()
+            if isinstance(message, p.Tuning):
+                self._on_tuning(message)
+            elif isinstance(message, p.Debug):
+                self._on_debug(message, received)
+            elif isinstance(message, p.Calibration):
+                self.calibration = message
+            else:
+                self.link_stats.telemetry(received)
+                self._on_telemetry(message)
+
+    def _on_debug(self, debug, received):
+        self.debug = debug
+        self.debug_time = time.monotonic()
+        self.link_stats.debug(debug.seq, received)
+        if self.run_stats is not None and self.run_start is not None:
+            self.run_stats.debug(debug, received)
+
+    def debug_alive(self):
+        """False with firmware that sends no debug frames."""
+        return self.debug is not None and             time.monotonic() - self.debug_time < ts.DEBUG_STALE_S
+
     def _on_telemetry(self, telemetry):
         previous = self.telemetry
         self.telemetry = telemetry
         self.telemetry_time = time.monotonic()
         self.telemetry_count += 1
+        if self.run_stats is not None and self.run_start is not None:
+            self.run_stats.telemetry(telemetry, self.link_stats.last_gap)
         self.chart["left"].append(telemetry.ir_left)
         self.chart["right"].append(telemetry.ir_right)
         self.chart["position"].append(telemetry.position)
@@ -1298,6 +1462,10 @@ class RoverGUI:
             self.selected_mode.set(t.mode)
         if self.tuning is not None and self.selected_controller.get() != self._controller():
             self.selected_controller.set(self._controller())
+        self._update_readout(t)
+
+    def _update_readout(self, t):
+        """The one-line sensor / wheel readout under the level bars."""
         self.readout_label.config(
             text=f"IR L {sensor_level(t.ir_left):.2f} ({int(t.left_white)})  "
                  f"IR R {sensor_level(t.ir_right):.2f} ({int(t.right_white)})  "
@@ -1586,7 +1754,6 @@ class PwmWindow:
     def __init__(self, gui):
         self.gui = gui
         self.user_time = 0.0
-        self.syncing = False
         self.window = tk.Toplevel(gui.root)
         self.window.title("PWM test")
         self.window.configure(bg=SOLID_BG)
@@ -1598,21 +1765,35 @@ class PwmWindow:
         self.note.pack(anchor=tk.W, pady=(0, 6))
         ttk.Label(panel, style="Muted.TLabel", wraplength=460, justify=tk.LEFT,
                   text="100 % = full forward, 50 % = stopped, 0 % = full reverse. "
+                       f"Type a duty and press Enter, or step it by {PWM_STEP} with the arrows. "
                        "'Slowed to turn' is the duty a wheel drops to when the other sensor "
                        "reads black.").pack(anchor=tk.W, pady=(0, 6))
         self.vars = {}
+        self.entries = {}
+        self.sent = {}                  # field: last duty sent or echoed, the base for a step
         self.value_labels = {}
         for field, command, label in p.PWM_LEVELS:
             ttk.Label(panel, text=label, style="Panel.TLabel").pack(anchor=tk.W, pady=(6, 0))
             row = ttk.Frame(panel, style="Plain.TFrame")
             row.pack(fill=tk.X)
-            var = tk.IntVar(value=50)
+            var = tk.StringVar(value="50")
             self.vars[field] = var
-            tk.Scale(row, from_=0, to=100, resolution=PWM_STEP, orient=tk.HORIZONTAL,
-                     variable=var, length=300, showvalue=False, bg=COLOUR_PANEL, fg=COLOUR_TEXT,
-                     highlightthickness=0, troughcolor=COLOUR_BORDER, activebackground=COLOUR_BLUE,
-                     takefocus=0,
-                     command=lambda _v, f=field, c=command: self._moved(f, c)).pack(side=tk.LEFT)
+            gui._button(row, "▼", lambda f=field, c=command: self._step(f, c, -PWM_STEP),
+                        min_width=44).pack(side=tk.LEFT)
+            entry = tk.Entry(row, textvariable=var, width=5, justify=tk.CENTER,
+                             bg=COLOUR_PANEL_RAISED, fg=COLOUR_TEXT, insertbackground=COLOUR_TEXT,
+                             relief=tk.FLAT, font=(FONT_FAMILY, 12, "bold"), highlightthickness=1,
+                             highlightbackground=COLOUR_BORDER, highlightcolor=COLOUR_BLUE)
+            entry.pack(side=tk.LEFT, padx=4, ipady=3)
+            # Enter or leaving the box sends the typed duty. No "all" tag, so typing
+            # digits here doesn't fire the main window's hotkeys (1-4 = mode, ...).
+            entry.bindtags((str(entry), "Entry", str(self.window)))
+            entry.bind("<Return>", lambda _e, f=field, c=command: self._typed(f, c))
+            entry.bind("<KP_Enter>", lambda _e, f=field, c=command: self._typed(f, c))
+            entry.bind("<FocusOut>", lambda _e, f=field, c=command: self._typed(f, c))
+            self.entries[field] = entry
+            gui._button(row, "▲", lambda f=field, c=command: self._step(f, c, +PWM_STEP),
+                        min_width=44).pack(side=tk.LEFT)
             value = ttk.Label(row, text="--", style="Panel.TLabel", width=26,
                               font=(FONT_FAMILY, 11, "bold"))
             value.pack(side=tk.LEFT, padx=8)
@@ -1630,13 +1811,26 @@ class PwmWindow:
         volts = duty * 30 / 100 - 15
         return f"{duty:3d} %   {volts:+5.1f} V   speed {speed:+4d} %"
 
-    def _moved(self, field, command):
-        if self.syncing:
-            return
+    def _send(self, field, command, value):
+        value = max(0, min(100, value))
         self.user_time = time.monotonic()
-        value = self.vars[field].get()
+        self.sent[field] = value
+        self.vars[field].set(str(value))
         self.value_labels[field].config(text=self._describe(value))
         self.gui.set_pwm_level(field, command, value)
+
+    def _typed(self, field, command):
+        try:
+            value = int(round(float(self.vars[field].get())))
+        except ValueError:              # Not a number: put back the last good value
+            self.vars[field].set(str(self.sent.get(field, 50)))
+            return
+        if value != self.sent.get(field):
+            self._send(field, command, value)
+
+    def _step(self, field, command, step):
+        self._typed(field, command)     # A half-typed value counts as the base
+        self._send(field, command, self.sent.get(field, 50) + step)
 
     def _poll(self):
         gui = self.gui
@@ -1653,12 +1847,14 @@ class PwmWindow:
                      + ("" if bang else "  -  these levels only apply to the Bang-bang controller"),
                 foreground=COLOUR_TEXT if bang else COLOUR_WARN)
             if time.monotonic() - self.user_time > PWM_USER_HOLD_S:
-                self.syncing = True
+                focus = self.window.focus_get()
                 for field, _command, _label in p.PWM_LEVELS:
+                    if self.entries[field] is focus:
+                        continue            # Being typed into
                     value = getattr(tuning, field)
-                    self.vars[field].set(value)
+                    self.sent[field] = value
+                    self.vars[field].set(str(value))
                     self.value_labels[field].config(text=self._describe(value))
-                self.syncing = False
             self.rover_label.config(
                 text=f"Rover has: L {tuning.pwm_straight_left}/{tuning.pwm_correct_left}  "
                      f"R {tuning.pwm_straight_right}/{tuning.pwm_correct_right}  (centred/slowed)")

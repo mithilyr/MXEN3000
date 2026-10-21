@@ -84,6 +84,23 @@ unsigned long searchStartMs = 0;
 int searchDir = TURN_CLOCKWISE;             // Direction of the latest search spin
 unsigned long cornerFoundMs = 0;            // When a corner search last found the line
 
+// ---- Debug telemetry (see protocol.h MSG_DEBUG) ----
+byte controlState = STATE_IDLE;
+float pTerm = 0.0f;                         // PID terms of the last step, turn %
+float iTerm = 0.0f;
+float dTerm = 0.0f;
+bool saturatedNow = false;                  // Steering clamped at maxTurn this step
+byte lostEvents = 0;                        // Times the line was lost this run
+byte calibrationResult = CAL_DEFAULTS;
+byte debugSeq = 0;
+// Since the last debug frame:
+unsigned int windowSteps = 0;
+unsigned int windowSaturated = 0;
+float windowMaxError = 0.0f;                // Largest |position|
+unsigned long windowStepMaxUs = 0;          // Longest control step
+unsigned long windowPeriodMaxUs = 0;        // Longest time between control steps
+unsigned long lastStepUs = 0;
+
 // ---- Timers ----
 unsigned long lastControlMs = 0;
 unsigned long lastTelemetryMs = 0;
@@ -170,13 +187,18 @@ void updateCalibration(unsigned long now) {
   if (now - calibrationStartMs < CALIBRATION_MS) return;
 
   calibrating = false;
+  tuningDirty = true;               // Sends the calibration frame at once
   for (byte s = 0; s < SENSOR_COUNT; s++) {
-    if (calibrationMax[s] - calibrationMin[s] < MIN_CALIBRATION_SPAN) return;
+    if (calibrationMax[s] - calibrationMin[s] < MIN_CALIBRATION_SPAN) {
+      calibrationResult = CAL_REJECTED;
+      return;
+    }
   }
   for (byte s = 0; s < SENSOR_COUNT; s++) {
     whiteLevel[s] = calibrationMin[s];
     blackLevel[s] = calibrationMax[s];
   }
+  calibrationResult = CAL_ACCEPTED;
 }
 
 // ============================================================
@@ -201,6 +223,7 @@ void startRun() {
   lastCorrectionEndMs = millis();
   lastCorrectionDir = lastTurn;
   correctionRate = 0.0f;
+  lostEvents = 0;
 }
 
 void stopRun() {
@@ -254,6 +277,7 @@ bool searchIfLineLost(bool lineMissing, unsigned long now, const ModeTuning& tun
   }
   if (!lineLost) {
     lineLost = true;
+    if (lostEvents < DATA_MAX) lostEvents++;
     nextBacktrackMs = now;
     searchStartMs = now;
     cornerSearch = lineWasCentred || now - lastSideMs < CORNER_WINDOW_MS;
@@ -261,6 +285,7 @@ bool searchIfLineLost(bool lineMissing, unsigned long now, const ModeTuning& tun
   }
   if (historyCount > 0) {
     // Backtrack: undo the newest recorded command, one sample at a time.
+    controlState = STATE_BACKTRACK;
     if (now >= nextBacktrackMs) {
       nextBacktrackMs = now + BACKTRACK_SAMPLE_MS;
       historyHead = (historyHead + BACKTRACK_SAMPLES - 1) % BACKTRACK_SAMPLES;
@@ -269,6 +294,7 @@ bool searchIfLineLost(bool lineMissing, unsigned long now, const ModeTuning& tun
     }
     return true;
   }
+  controlState = cornerSearch ? STATE_CORNER_SWEEP : STATE_SPIN;
   searchDir = cornerSearch ? sweepDirection(now - searchStartMs) : lastTurn;
   int spin = searchDir * tuning.searchSpeed;
   setWheelSpeeds(spin, -spin);
@@ -306,6 +332,7 @@ void updateAdaptive(unsigned long now) {
       correcting = false;
       lastCorrectionEndMs = now;
     }
+    controlState = STATE_FOLLOW;
     setWheelSpeeds(forward, forward);
     return;
   }
@@ -320,6 +347,8 @@ void updateAdaptive(unsigned long now) {
     correctionRate += tuning.adaptRamp * periodSeconds;
     correctionRate = min(correctionRate, (float)tuning.maxTurn);
   }
+  controlState = STATE_ADAPT_TURN;
+  saturatedNow = correctionRate >= tuning.maxTurn;
 
   // turn > 0 rotates the rover clockwise.
   float turn = tuning.steerSign * dir * correctionRate;
@@ -350,7 +379,9 @@ bool analogLineLost(unsigned long now, const ModeTuning& tuning) {
 void driveWithTurn(const ModeTuning& tuning, float turn) {
   const float rightGain = RIGHT_TURN_GAIN[mode];
   if (turn > 0.0f) turn *= rightGain;
+  float wanted = turn;
   turn = constrain(turn, -tuning.maxTurn, tuning.maxTurn * rightGain);
+  saturatedNow = turn != wanted;
   int forward = tuning.travelDir * baseSpeed;
   setWheelSpeeds(forward + turn, forward - turn);
 }
@@ -383,9 +414,11 @@ void updatePid(unsigned long now) {
   // arcing the way it was spinning until one sensor alone sees the line.
   bool bothWhite = normLevel[SENSOR_LEFT] < WHITE_BELOW && normLevel[SENSOR_RIGHT] < WHITE_BELOW;
   if (bothWhite && now - cornerFoundMs < CORNER_HOLD_MS[mode]) {
+    controlState = STATE_CORNER_HOLD;
     driveWithTurn(tuning, searchDir * CORNER_HOLD_TURN * tuning.maxTurn);
     return;
   }
+  controlState = STATE_FOLLOW;
 
   const float periodSeconds = CONTROL_PERIOD_MS / 1000.0f;
   float error = lineOffset(position);
@@ -403,9 +436,10 @@ void updatePid(unsigned long now) {
 
   // A positive error (line to the left) needs an anticlockwise
   // correction, hence the minus sign.
-  float turn = -tuning.steerSign * (tuning.kp * error + tuning.ki * integral +
-                                    tuning.kd * filteredDerivative);
-  driveWithTurn(tuning, turn);
+  pTerm = -tuning.steerSign * tuning.kp * error;
+  iTerm = -tuning.steerSign * tuning.ki * integral;
+  dTerm = -tuning.steerSign * tuning.kd * filteredDerivative;
+  driveWithTurn(tuning, pTerm + iTerm + dTerm);
 }
 
 // Electrical PWM duty (100 = full forward, 50 = stopped, 0 = full reverse) to
@@ -430,6 +464,7 @@ void updateBangBang(unsigned long now) {
 
   bool leftBlack = normLevel[SENSOR_LEFT] > BLACK_ABOVE;
   bool rightBlack = normLevel[SENSOR_RIGHT] > BLACK_ABOVE;
+  if (leftBlack && rightBlack) controlState = STATE_BANG_BOTH_BLACK;
   if (leftBlack && rightBlack && mode == MODE_CLOCKWISE) {
     setWheelSpeeds(dutyToSpeed(tuning.pwmStraightLeft), dutyToSpeed(CW_BOTH_BLACK_RIGHT_DUTY));
     return;
@@ -439,6 +474,11 @@ void updateBangBang(unsigned long now) {
     bool swap = leftBlack;
     leftBlack = rightBlack;
     rightBlack = swap;
+  }
+  if (rightBlack != leftBlack) {
+    controlState = rightBlack ? STATE_BANG_LEFT : STATE_BANG_RIGHT;  // Slowed wheel's side
+  } else if (!rightBlack) {
+    controlState = STATE_BANG_STRAIGHT;
   }
   setWheelSpeeds(dutyToSpeed(rightBlack ? tuning.pwmCorrectLeft : tuning.pwmStraightLeft),
                  dutyToSpeed(leftBlack ? tuning.pwmCorrectRight : tuning.pwmStraightRight));
@@ -603,6 +643,63 @@ void sendTelemetry() {
   sendFrame(frame, TELEMETRY_FRAME_LENGTH);
 }
 
+byte toSignedByte(float value) {
+  return toDataByte(lround(value) + SIGNED_OFFSET);
+}
+
+byte tenthsOfMs(unsigned long us) {
+  return toDataByte((us + 50) / 100);
+}
+
+// The controller's insides (protocol.h MSG_DEBUG). Clears the per-window
+// figures, so each frame covers the control steps since the one before.
+void sendDebug() {
+  byte saturatedPercent = windowSteps ? 100UL * windowSaturated / windowSteps : 0;
+  byte frame[DEBUG_FRAME_LENGTH] = {
+    FRAME_START,
+    MSG_DEBUG,
+    debugSeq,
+    controlState,
+    toSignedByte(pTerm),
+    toSignedByte(iTerm),
+    toSignedByte(dTerm),
+    toSignedByte((lastLeftPercent - lastRightPercent) / 2.0f),  // Turn the wheels give, > 0 = clockwise
+    toDataByte(lround(correctionRate)),
+    saturatedPercent,
+    toDataByte(lround(windowMaxError * 100)),
+    toDataByte(windowSteps),
+    tenthsOfMs(windowStepMaxUs),
+    tenthsOfMs(windowPeriodMaxUs),
+    lostEvents,
+    (byte)(saturatedNow ? DEBUG_SATURATED : 0),
+    0
+  };
+  sendFrame(frame, DEBUG_FRAME_LENGTH);
+  debugSeq = (debugSeq + 1) % SEQ_COUNT;
+  windowSteps = 0;
+  windowSaturated = 0;
+  windowMaxError = 0.0f;
+  windowStepMaxUs = 0;
+  windowPeriodMaxUs = 0;
+}
+
+// The white / black levels the rover normalises with, and how the last
+// calibration went.
+void sendCalibration() {
+  const int ADC_TO_BYTE_SHIFT = 2;
+  byte frame[CALIBRATION_FRAME_LENGTH] = {
+    FRAME_START,
+    MSG_CALIBRATION,
+    toDataByte(whiteLevel[SENSOR_LEFT] >> ADC_TO_BYTE_SHIFT),
+    toDataByte(whiteLevel[SENSOR_RIGHT] >> ADC_TO_BYTE_SHIFT),
+    toDataByte(blackLevel[SENSOR_LEFT] >> ADC_TO_BYTE_SHIFT),
+    toDataByte(blackLevel[SENSOR_RIGHT] >> ADC_TO_BYTE_SHIFT),
+    calibrationResult,
+    0
+  };
+  sendFrame(frame, CALIBRATION_FRAME_LENGTH);
+}
+
 // Reports the tuning values the rover is using, so the GUI shows what the
 // rover really has, not what was last requested.
 void sendTuning() {
@@ -663,16 +760,33 @@ void loop() {
 
   if (now - lastControlMs >= CONTROL_PERIOD_MS) {
     lastControlMs = now;
+    unsigned long stepStartUs = micros();
+    if (lastStepUs != 0) {
+      windowPeriodMaxUs = max(windowPeriodMaxUs, stepStartUs - lastStepUs);
+    }
+    lastStepUs = stepStartUs;
+    pTerm = iTerm = dTerm = 0.0f;
+    saturatedNow = false;
+
     updateSensors();
     if (calibrating) {
+      controlState = STATE_CALIBRATING;
       updateCalibration(now);
     } else if (running) {
       updateLineFollower(now);
+    } else {
+      controlState = STATE_IDLE;
     }
+
+    windowStepMaxUs = max(windowStepMaxUs, micros() - stepStartUs);
+    windowSteps++;
+    if (saturatedNow) windowSaturated++;
+    windowMaxError = max(windowMaxError, fabs(position));
   }
 
   if (now - lastTelemetryMs >= TELEMETRY_PERIOD_MS) {
     lastTelemetryMs = now;
+    sendDebug();          // First, so the GUI logs it with the telemetry that follows
     sendTelemetry();
   }
 
@@ -680,6 +794,7 @@ void loop() {
     tuningDirty = false;
     lastTuningMs = now;
     sendTuning();
+    sendCalibration();
   }
 
 #if !LINK_USE_SOFTWARE_SERIAL

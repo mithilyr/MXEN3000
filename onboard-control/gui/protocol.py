@@ -7,6 +7,11 @@ Rover -> PC, 11 bytes: [START][TELEMETRY][irLeft][irRight][dacLeft]
                        [dacRight][position][speed][status][sensors][checksum]
 Rover -> PC, 12 bytes: [START][TUNING][mode][controller][gain x10][ramp]
                        [maxTurn][kp][kd x10][ki][bangLevel x100][checksum]
+Rover -> PC, 17 bytes: [START][DEBUG][seq][state][pTerm][iTerm][dTerm][turn]
+                       [adaptRate][saturated %][maxError x100][steps]
+                       [stepMax x0.1ms][periodMax x0.1ms][lostEvents][flags][checksum]
+Rover -> PC, 8 bytes:  [START][CALIBRATION][whiteL][whiteR][blackL][blackR]
+                       [result][checksum]
 
 checksum = sum of all previous bytes in the frame, & 0xFF. Data bytes are
 never FRAME_START, so a receiver can re-synchronise on the next FRAME_START.
@@ -49,7 +54,15 @@ MSG_TELEMETRY = 0x20
 TELEMETRY_FRAME_LENGTH = 11
 MSG_TUNING = 0x21
 TUNING_FRAME_LENGTH = 16
-FRAME_LENGTHS = {MSG_TELEMETRY: TELEMETRY_FRAME_LENGTH, MSG_TUNING: TUNING_FRAME_LENGTH}
+MSG_DEBUG = 0x22            # Controller insides, just before each telemetry frame
+DEBUG_FRAME_LENGTH = 17
+MSG_CALIBRATION = 0x23      # White / black levels, with each tuning frame
+CALIBRATION_FRAME_LENGTH = 8
+FRAME_LENGTHS = {MSG_TELEMETRY: TELEMETRY_FRAME_LENGTH, MSG_TUNING: TUNING_FRAME_LENGTH,
+                 MSG_DEBUG: DEBUG_FRAME_LENGTH, MSG_CALIBRATION: CALIBRATION_FRAME_LENGTH}
+SIGNED_OFFSET = 127         # Signed debug values are sent as value + SIGNED_OFFSET
+SEQ_COUNT = 254             # Debug seq runs 0..253
+DEBUG_SATURATED = 0x01
 
 STATUS_RUNNING = 0x01
 STATUS_LINE_LOST = 0x02
@@ -73,6 +86,42 @@ MODE_NAMES = {
     MODE_REVERSE: "Reverse",
 }
 
+# What the controller is doing (debug frame), in firmware order
+STATE_IDLE = 0
+STATE_CALIBRATING = 1
+STATE_FOLLOW = 2
+STATE_BACKTRACK = 3
+STATE_SPIN = 4
+STATE_CORNER_SWEEP = 5
+STATE_CORNER_HOLD = 6
+STATE_ADAPT_TURN = 7
+STATE_BANG_STRAIGHT = 8
+STATE_BANG_LEFT = 9
+STATE_BANG_RIGHT = 10
+STATE_BANG_BOTH_BLACK = 11
+STATE_NAMES = {
+    STATE_IDLE: "IDLE",
+    STATE_CALIBRATING: "CALIBRATING",
+    STATE_FOLLOW: "FOLLOW",
+    STATE_BACKTRACK: "LOST: BACKTRACK",
+    STATE_SPIN: "LOST: SPIN",
+    STATE_CORNER_SWEEP: "LOST: CORNER SWEEP",
+    STATE_CORNER_HOLD: "CORNER HOLD",
+    STATE_ADAPT_TURN: "ADAPTIVE TURN",
+    STATE_BANG_STRAIGHT: "BANG STRAIGHT",
+    STATE_BANG_LEFT: "BANG TURN LEFT",
+    STATE_BANG_RIGHT: "BANG TURN RIGHT",
+    STATE_BANG_BOTH_BLACK: "BANG BOTH BLACK",
+}
+LOST_STATES = (STATE_BACKTRACK, STATE_SPIN, STATE_CORNER_SWEEP)
+
+# Calibration frame result
+CAL_DEFAULTS = 0
+CAL_ACCEPTED = 1
+CAL_REJECTED = 2
+CAL_RESULT_NAMES = {CAL_DEFAULTS: "config.h defaults", CAL_ACCEPTED: "calibrated",
+                    CAL_REJECTED: "LAST SWEEP REJECTED (span too small)"}
+
 # Steering controllers, in firmware order (one per mode)
 CONTROLLER_PID = 0
 CONTROLLER_BANG_BANG = 1
@@ -90,6 +139,8 @@ ADC_TO_BYTE_SCALE = 4  # Firmware sends the 10-bit ADC reading >> 2
 # DAC field stands for full scale (255). Code 254 is never used.
 DAC_FULL_SCALE = 255
 MOTOR_VOLTS_MAX = 15.0
+DAC_NEUTRAL = 128           # config.h: motor stopped
+DAC_SPAN = 127
 
 
 def dac_to_volts(code):
@@ -99,6 +150,11 @@ def dac_to_volts(code):
 def dac_to_percent(code):
     """DAC code -> expected PWM duty cycle, % (0 = -15 V, 255 = +15 V)."""
     return code * 100.0 / DAC_FULL_SCALE
+
+
+def dac_to_speed(code):
+    """DAC code -> wheel speed, -100..100 % (the firmware's speedToDac, inverted)."""
+    return (code - DAC_NEUTRAL) * 100 / DAC_SPAN
 
 
 def dac_from_data(data):
@@ -187,6 +243,81 @@ def decode_tuning(frame):
     )
 
 
+def from_signed(data):
+    return data - SIGNED_OFFSET
+
+
+def tenths_ms(data):
+    """A debug timing byte (0.1 ms units) -> ms. DATA_MAX means 25.4 ms or more."""
+    return data / 10.0
+
+
+@dataclass
+class Debug:
+    """The controller's insides. The window figures cover every control step
+    since the previous debug frame."""
+    seq: int
+    state: int
+    p_term: int         # PID terms of the last step, turn % (> 0 = clockwise)
+    i_term: int
+    d_term: int
+    turn: int           # Turn the wheels give: (left % - right %) / 2
+    adapt_rate: int     # Adaptive correction rate, %
+    saturated_pct: int  # Window: % of steps with the steering clamped at max turn
+    max_error: float    # Window: largest |position|, 0-1
+    steps: int          # Window: control steps
+    step_max_ms: float  # Window: longest control step
+    period_max_ms: float  # Window: longest time between control steps
+    lost_events: int    # Times the line was lost this run
+    saturated: bool     # Clamped on the last step
+
+
+def decode_debug(frame):
+    return Debug(
+        seq=frame[2],
+        state=frame[3],
+        p_term=from_signed(frame[4]),
+        i_term=from_signed(frame[5]),
+        d_term=from_signed(frame[6]),
+        turn=from_signed(frame[7]),
+        adapt_rate=frame[8],
+        saturated_pct=frame[9],
+        max_error=frame[10] / 100.0,
+        steps=frame[11],
+        step_max_ms=tenths_ms(frame[12]),
+        period_max_ms=tenths_ms(frame[13]),
+        lost_events=frame[14],
+        saturated=bool(frame[15] & DEBUG_SATURATED),
+    )
+
+
+@dataclass
+class Calibration:
+    """The raw ADC levels the rover treats as white and black, per side."""
+    white_left: int
+    white_right: int
+    black_left: int
+    black_right: int
+    result: int
+
+
+def decode_calibration(frame):
+    return Calibration(
+        white_left=frame[2] * ADC_TO_BYTE_SCALE,
+        white_right=frame[3] * ADC_TO_BYTE_SCALE,
+        black_left=frame[4] * ADC_TO_BYTE_SCALE,
+        black_right=frame[5] * ADC_TO_BYTE_SCALE,
+        result=frame[6],
+    )
+
+
+def normalised(raw, white, black):
+    """The firmware's normalise(): 0 = white, 1 = black."""
+    if black == white:
+        return 0.0
+    return max(0.0, min(1.0, (raw - white) / (black - white)))
+
+
 # The four bang-bang wheel levels: (Tuning field, command, label)
 PWM_LEVELS = (
     ("pwm_straight_left", CMD_SET_PWM_STRAIGHT_LEFT, "Left wheel, line centred"),
@@ -196,7 +327,8 @@ PWM_LEVELS = (
 )
 
 
-DECODERS = {MSG_TELEMETRY: decode_telemetry, MSG_TUNING: decode_tuning}
+DECODERS = {MSG_TELEMETRY: decode_telemetry, MSG_TUNING: decode_tuning,
+            MSG_DEBUG: decode_debug, MSG_CALIBRATION: decode_calibration}
 
 
 @dataclass(frozen=True)

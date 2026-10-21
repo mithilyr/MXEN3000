@@ -14,6 +14,11 @@
 //                        [dacRight][position][speed][status][sensors][checksum]
 // Rover -> PC, 12 bytes: [START][TUNING][mode][controller][gain x10][ramp]
 //                        [maxTurn][kp][kd x10][ki][bangLevel x100][checksum]
+// Rover -> PC, 17 bytes: [START][DEBUG][seq][state][pTerm][iTerm][dTerm][turn]
+//                        [adaptRate][saturated %][maxError x100][steps]
+//                        [stepMax x0.1ms][periodMax x0.1ms][lostEvents][flags][checksum]
+// Rover -> PC, 8 bytes:  [START][CALIBRATION][whiteL][whiteR][blackL][blackR]
+//                        [result][checksum]
 #pragma once
 
 #include <Arduino.h>
@@ -70,6 +75,43 @@ constexpr byte STATUS_MODE_SHIFT = 4;     // Mode lives in bits 4-6
 // Sensors byte bit layout: 1 = sensor is over the white line, 0 = over black
 constexpr byte SENSOR_LEFT_WHITE = 0x01;
 constexpr byte SENSOR_RIGHT_WHITE = 0x02;
+
+// ---- Debug telemetry (rover -> PC), sent just before each telemetry frame ----
+// The controller's insides for tuning. stepMax, periodMax, maxError, saturated %
+// and steps cover EVERY control step since the previous debug frame, so nothing
+// between the 10 Hz frames is missed. Signed values (the turn terms, % of
+// full speed, > 0 = clockwise) are sent as value + SIGNED_OFFSET.
+constexpr byte MSG_DEBUG = 0x22;
+constexpr byte DEBUG_FRAME_LENGTH = 17;
+constexpr int SIGNED_OFFSET = 127;
+constexpr byte SEQ_COUNT = 254;           // seq runs 0..253, so lost frames can be counted
+constexpr byte DEBUG_SATURATED = 0x01;    // Flags: the steering hit maxTurn this step
+
+// What the controller is doing (debug frame "state")
+enum ControlState : byte {
+  STATE_IDLE = 0,
+  STATE_CALIBRATING = 1,
+  STATE_FOLLOW = 2,           // PID tracking, or adaptive driving straight
+  STATE_BACKTRACK = 3,        // Line lost: retracing the last wheel commands
+  STATE_SPIN = 4,             // Line lost: spinning towards the last side seen
+  STATE_CORNER_SWEEP = 5,     // Line lost at a corner: sweeping in place
+  STATE_CORNER_HOLD = 6,      // PID: arcing round a corner just found
+  STATE_ADAPT_TURN = 7,       // Adaptive: correcting
+  STATE_BANG_STRAIGHT = 8,
+  STATE_BANG_LEFT = 9,        // Bang-bang: left wheel slowed (turning left)
+  STATE_BANG_RIGHT = 10,      // Bang-bang: right wheel slowed (turning right)
+  STATE_BANG_BOTH_BLACK = 11
+};
+
+// ---- Calibration levels (rover -> PC), sent with every tuning frame ----
+// Raw ADC levels >> 2 the rover uses for white and black on each side.
+constexpr byte MSG_CALIBRATION = 0x23;
+constexpr byte CALIBRATION_FRAME_LENGTH = 8;
+enum CalibrationResult : byte {
+  CAL_DEFAULTS = 0,           // Never calibrated: config.h levels
+  CAL_ACCEPTED = 1,
+  CAL_REJECTED = 2            // Last sweep's span < MIN_CALIBRATION_SPAN: levels unchanged
+};
 
 // ---- Driving modes ----
 enum Mode : byte {

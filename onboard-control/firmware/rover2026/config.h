@@ -124,7 +124,7 @@ constexpr float BLACK_ABOVE = 0.65f;
 // likely off to the right (inside of the clockwise track), so the right wheel
 // drops to this duty (%) while the left keeps pwmStraightLeft: a gentle right
 // turn. Keep it between pwmCorrectRight and pwmStraightRight for "a bit".
-constexpr int CW_BOTH_BLACK_RIGHT_DUTY = 62;
+constexpr int CW_BOTH_BLACK_RIGHT_DUTY = 60;
 
 // PID only, one per mode (Clockwise, Anticlockwise, Squiggle, Reverse): right
 // (clockwise) turns are multiplied by this, and so is their maxTurn limit.
@@ -132,7 +132,7 @@ constexpr int CW_BOTH_BLACK_RIGHT_DUTY = 62;
 // right; 1.3 = 30 % more steering to the right. The bench test
 // (DAC_Lab_Inputs.xlsx) shows both motor channels within 1 % duty of each
 // other, so the left/right difference comes from the motors, wheels or sensors.
-constexpr float RIGHT_TURN_GAIN[MODE_COUNT] = {1.0f, 1.0f, 1.3f, 1.0f};
+constexpr float RIGHT_TURN_GAIN[MODE_COUNT] = {1.2f, 1.2f, 1.5f, 1.0f};
 
 // PID: the derivative is low-pass filtered, because a raw difference of two
 // sensor readings 5 ms apart is mostly noise. Each period the filtered value
@@ -205,8 +205,8 @@ struct ModeTuning {
 // long curves.
 constexpr ModeTuning MODE_TUNING[MODE_COUNT] = {
   // travel  defaultTurn          controller       base  search  kp     ki    kd    gain   ramp   maxTurn  bang   steer  strL strR corL corR
-  {  1,      TURN_CLOCKWISE,      CONTROLLER_BANG_BANG, 85, 30,  60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 20,      0.3f,  1,     70,  70,  55,  55 },  // Clockwise: 70 % duty, slow side drops to 55 % (clean on the test track)
-  {  1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  45,   30,     60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 60,      0.3f,  1,     70,  70,  50,  50 },  // Anticlockwise
-  {  1,      TURN_CLOCKWISE,      CONTROLLER_PID,  35,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f,  1,     65,  65,  50,  50 },  // Squiggle
+  {  1,      TURN_CLOCKWISE,      CONTROLLER_BANG_BANG, 85, 30,  60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 20,      0.3f,  1,     85,  80,  50,  42 },  // Clockwise: from the track's 80/80/45/45, left wheel pushed harder and right correction deeper, as right turns were slow (21-Oct)
+  {  1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  55,   30,     60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 60,      0.3f,  1,     70,  70,  50,  50 },  // Anticlockwise
+  {  1,      TURN_CLOCKWISE,      CONTROLLER_PID,  45,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f,  1,     65,  65,  50,  50 },  // Squiggle
   { -1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  25,   25,     50.0f, 0.0f, 1.5f, 6.0f,  30.0f, 50,      0.3f,  1,     35,  35,  50,  50 },  // Reverse
 };

@@ -30,6 +30,20 @@ gui/
   requirements.txt
 ```
 
+## What's new (21 Oct 2026): control telemetry, ROVER view, green terminal look
+
+- **Two new rover → PC frames** (`protocol.h` / `gui/protocol.py`, additive): a 17-byte **debug** frame just before each telemetry frame (controller state, PID P/I/D terms, actual turn, adaptive rate, and for *every* 5 ms step since the last frame: % of steps saturated at max turn, largest |position|, longest step and step-to-step period, step count; plus lost-line count and a sequence number) and an 8-byte **calibration** frame with each tuning frame (white/black levels per side, and whether the last `C` sweep was accepted or rejected).
+- **`RoverControlMap.exe` is now a telemetry dashboard** (the track map is gone; `TrackMap.exe` still replays the logs):
+  - **ROVER** (`gui/rover_view.py`): top-down drawing of our cart (rounded acrylic chassis, green PCB, Nano, XBee, battery holders, treaded side wheels, castor, IR sensors at the nose). An IR sensor lights in its side's colour (left phosphor white, right mint green) and reads "WHITE (line)" while over the line, "BLACK (table)" otherwise; a tyre's tread lights brighter the faster it drives (yellow = backwards); the XBee LED lights while frames arrive; the chassis edge goes light grey when the line is lost. Each part shows its own values beside it, and a turn gauge under the rover shows the turn against ±max turn.
+  - **WAVEFORMS** (`gui/scope_view.py`): last 20 s of IR level L/R, position (grey marks = line lost), PWM duty L/R, and P/I/D and turn (grey marks = steering at max), with each trace's latest value beside its strip.
+  - **DATA**: only what decides the lap time. STATUS: controller state, radio (lost frames, longest gap), calibration result and white/black levels, bang-bang PWM levels. RUN (live, then the last run): time, average speed, average and minimum duty per wheel, RMS/max position, % saturated, lost-line count and time, weave Hz, worst loop period, radio frames lost.
+- **Everything else goes to the logs** (in `logs/` next to the .exe), for analysis later:
+  - `run-stats.csv`: one row per run with the lap figures above plus loop timing, radio gap, checksum errors, bytes/s, commands sent, every tuning value the rover reported (mode, base speed, kp/ki/kd, max turn, bang level, adaptive gain/ramp, bang-bang PWM levels), calibration levels, port, PAN ID and the run's ir-log file name. A file with an older header is renamed to `run-stats_old_<time>.csv`.
+  - `ir-log_*.csv`: one row per telemetry frame: raw and normalised IR, the 1/0 sensor decisions, position, DAC code, duty and speed per wheel, line lost, frame gap, controller state, P/I/D/turn, saturation, loop timing, lost count and debug frame number. The first 8 columns are unchanged, so TrackMap.exe still reads them.
+  - `README-logs.md`: written by the GUI (`gui/log_guide.py`); explains every file and column and how to analyse them for a faster lap.
+- **Green terminal look** (`gui/theme.py`): phosphor green on black, lime accent, white for left and mint for right readings, yellow for warnings, light grey for faults (no orange, red, magenta or cyan); flat outlined boxes, Consolas, 10 Hz refresh. The original exe is kept as `gui/dist/RoverControlMap_before_amber.exe`.
+- **Upload the firmware for the new readings.** With old firmware the GUI still drives the rover, and the DATA box says "NO DEBUG". The old exe with the new firmware counts the new frames as checksum errors but otherwise works.
+
 ## What's new (13 Oct 2026)
 
 Ideas taken from [GilbertJ3072/MXEN3000](https://github.com/GilbertJ3072/MXEN3000) and rebuilt to run on the rover, not the PC:
