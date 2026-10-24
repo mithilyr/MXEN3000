@@ -120,11 +120,6 @@ constexpr float SIDE_MEMORY_LEVEL = 0.2f;
 // keeps its last value, so noise or a half-covered sensor cannot make it flicker.
 constexpr float WHITE_BELOW = 0.35f;
 constexpr float BLACK_ABOVE = 0.65f;
-// Bang-bang in Clockwise mode: with both sensors on black the line is most
-// likely off to the right (inside of the clockwise track), so the right wheel
-// drops to this duty (%) while the left keeps pwmStraightLeft: a gentle right
-// turn. Keep it between pwmCorrectRight and pwmStraightRight for "a bit".
-constexpr int CW_BOTH_BLACK_RIGHT_DUTY = 60;
 
 // PID only, one per mode (Clockwise, Anticlockwise, Squiggle, Reverse): right
 // (clockwise) turns are multiplied by this, and so is their maxTurn limit.
@@ -132,7 +127,8 @@ constexpr int CW_BOTH_BLACK_RIGHT_DUTY = 60;
 // right; 1.3 = 30 % more steering to the right. The bench test
 // (DAC_Lab_Inputs.xlsx) shows both motor channels within 1 % duty of each
 // other, so the left/right difference comes from the motors, wheels or sensors.
-constexpr float RIGHT_TURN_GAIN[MODE_COUNT] = {1.2f, 1.2f, 1.5f, 1.0f};
+// All four modes use the Squiggle value (24-Oct).
+constexpr float RIGHT_TURN_GAIN[MODE_COUNT] = {1.5f, 1.5f, 1.5f, 1.5f};
 
 // PID: the derivative is low-pass filtered, because a raw difference of two
 // sensor readings 5 ms apart is mostly noise. Each period the filtered value
@@ -166,7 +162,8 @@ constexpr unsigned long CORNER_WINDOW_MS = 150;
 // sensors read white, the rover arcs the way it was spinning at
 // CORNER_HOLD_TURN x maxTurn instead of driving straight. 0 = off.
 // Longer or stronger = bigger turns out of each bend.
-constexpr unsigned long CORNER_HOLD_MS[MODE_COUNT] = {0, 0, 250, 0};
+// All four modes use the Squiggle value (24-Oct).
+constexpr unsigned long CORNER_HOLD_MS[MODE_COUNT] = {250, 250, 250, 250};
 constexpr float CORNER_HOLD_TURN = 0.6f;
 
 constexpr int SPEED_MAX = 100;              // Speeds are % of DAC_SPAN
@@ -201,12 +198,13 @@ struct ModeTuning {
 // Starting values only. The GUI can change them live (they are copied to RAM
 // at power-up, so a reset brings these back). Tune each mode on the stadium
 // track, then copy the best values from the GUI back into this table.
-// ki starts at 0 (plain PD). Add it only if the rover runs off-centre on the
+// Every mode starts on bang-bang (24-Oct); PID and adaptive stay available
+// from the GUI with T. ki starts at 0 (plain PD). Add it only if the rover runs off-centre on the
 // long curves.
 constexpr ModeTuning MODE_TUNING[MODE_COUNT] = {
   // travel  defaultTurn          controller       base  search  kp     ki    kd    gain   ramp   maxTurn  bang   steer  strL strR corL corR
-  {  1,      TURN_CLOCKWISE,      CONTROLLER_BANG_BANG, 85, 30,  60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 20,      0.3f,  1,     85,  80,  50,  42 },  // Clockwise: from the track's 80/80/45/45, left wheel pushed harder and right correction deeper, as right turns were slow (21-Oct)
-  {  1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  55,   30,     60.0f, 0.0f, 1.0f, 8.0f,  40.0f, 60,      0.3f,  1,     70,  70,  50,  50 },  // Anticlockwise
-  {  1,      TURN_CLOCKWISE,      CONTROLLER_PID,  45,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f,  1,     65,  65,  50,  50 },  // Squiggle
-  { -1,      TURN_ANTICLOCKWISE,  CONTROLLER_PID,  25,   25,     50.0f, 0.0f, 1.5f, 6.0f,  30.0f, 50,      0.3f,  1,     35,  35,  50,  50 },  // Reverse
+  {  1,      TURN_CLOCKWISE,      CONTROLLER_BANG_BANG, 45,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f,  1,     90,  90,  55,  55 },  // Clockwise: exact copy of Squiggle (24-Oct)
+  {  1,      TURN_CLOCKWISE,      CONTROLLER_BANG_BANG, 45,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f,  1,     90,  90,  55,  55 },  // Anticlockwise: exact copy of Squiggle (24-Oct)
+  {  1,      TURN_CLOCKWISE,      CONTROLLER_BANG_BANG, 45,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f,  1,     90,  90,  55,  55 },  // Squiggle
+  { -1,      TURN_ANTICLOCKWISE,  CONTROLLER_BANG_BANG, 45,   30,     80.0f, 0.0f, 1.5f, 10.0f, 60.0f, 70,      0.3f, -1,     30,  30,  45,  45 },  // Reverse: Squiggle mirrored - drives backwards, steering swapped left/right, own reverse PWM levels (24-Oct)
 };

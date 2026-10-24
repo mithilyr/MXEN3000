@@ -31,6 +31,11 @@ import xbee_setup as xb
 BAUD_RATE = xb.LINK_BAUD
 READ_WAKE_TIMEOUT_S = 0.05      # Reader blocks until a byte arrives (no polling delay)
 KEEPALIVE_S = 0.1               # Resend unchanged DAC codes this often (rover watchdog 0.3 s)
+# Overflow protection: the XBees have no flow control, so the PC keeps its own
+# output well inside what the radio can carry.
+MIN_MOTOR_GAP_S = 0.04          # At most 25 motor frames/s; the newest codes win
+MAX_TX_BACKLOG_BYTES = 2 * io.MOTOR_FRAME_LENGTH   # Unsent bytes allowed in the OS buffer
+WRITE_TIMEOUT_S = 0.05          # A stalled port must never block the control loop
 TELEMETRY_PERIOD_S = 0.1        # GUI telemetry rate, 10 Hz
 TUNING_PERIOD_S = 1.0           # Slow tuning refresh; changes are echoed at once
 # Radio dropouts while running. The rover's own watchdog has gone neutral after
@@ -115,17 +120,20 @@ class ModeTuning:
 
 # Starting values, adapted from the onboard-control config.h for a loop that
 # is about 8x slower and 35-55 ms late (one sensor period + the radio):
-#   - Clockwise and Anticlockwise use bang-bang: it reacts to black/white
-#     crossings, so delay hurts it least. Anticlockwise mirrors Clockwise.
 #   - kd is halved everywhere: the derivative term suffers most from delay.
 #   - Squiggle's PID base speed drops from 35 to 30 %.
+#   - Every mode starts on bang-bang (24-Oct); PID and adaptive stay available
+#     from the GUI with T.
+#   - Clockwise and Anticlockwise are copies of Squiggle (24-Oct).
+#   - Reverse is Squiggle mirrored: it drives backwards, steer_sign = -1 swaps
+#     left/right corrections, and it has its own reverse (below 50) duties.
 # The GUI tunes them live; press "Copy for pc_brain.py" and paste the best ones here.
 MODE_TUNING = (
     #          travel defaultTurn          controller             base search kp    ki   kd   gain  ramp  maxT bang steer strL strR corL corR
-    ModeTuning(1,  TURN_CLOCKWISE,     p.CONTROLLER_BANG_BANG, 85, 30, 60.0, 0.0, 0.5, 8.0,  40.0, 20, 0.3, 1, 70, 70, 55, 55),  # Clockwise
-    ModeTuning(1,  TURN_ANTICLOCKWISE, p.CONTROLLER_BANG_BANG, 85, 30, 60.0, 0.0, 0.5, 8.0,  40.0, 60, 0.3, 1, 70, 70, 55, 55),  # Anticlockwise
-    ModeTuning(1,  TURN_CLOCKWISE,     p.CONTROLLER_PID,       30, 30, 80.0, 0.0, 0.8, 10.0, 60.0, 70, 0.3, 1, 65, 65, 50, 50),  # Squiggle
-    ModeTuning(-1, TURN_ANTICLOCKWISE, p.CONTROLLER_PID,       25, 25, 50.0, 0.0, 0.8, 6.0,  30.0, 50, 0.3, 1, 35, 35, 50, 50),  # Reverse
+    ModeTuning(1,  TURN_CLOCKWISE,     p.CONTROLLER_BANG_BANG, 30, 30, 80.0, 0.0, 0.8, 10.0, 60.0, 70, 0.3, 1,  90, 90, 55, 55),  # Clockwise: copy of Squiggle
+    ModeTuning(1,  TURN_ANTICLOCKWISE, p.CONTROLLER_BANG_BANG, 30, 30, 80.0, 0.0, 0.8, 10.0, 60.0, 70, 0.3, 1,  90, 90, 55, 55),  # Anticlockwise: copy of Squiggle
+    ModeTuning(1,  TURN_CLOCKWISE,     p.CONTROLLER_BANG_BANG, 30, 30, 80.0, 0.0, 0.8, 10.0, 60.0, 70, 0.3, 1,  90, 90, 55, 55),  # Squiggle
+    ModeTuning(-1, TURN_ANTICLOCKWISE, p.CONTROLLER_BANG_BANG, 30, 30, 80.0, 0.0, 0.8, 10.0, 60.0, 70, 0.3, -1, 30, 30, 45, 45),  # Reverse: Squiggle mirrored
 )
 
 TUNING_COMMANDS = {p.CMD_SET_MODE, p.CMD_SET_SPEED, p.CMD_SET_ADAPT_GAIN, p.CMD_SET_ADAPT_RAMP,
@@ -521,6 +529,7 @@ class Health:
     lost_frames: int        # Sensor frames that never arrived
     stale_frames: int = 0   # Frames that arrived bunched up; only the newest was used
     dropouts: int = 0       # Radio gaps ridden through since connect
+    throttled: int = 0      # Motor frames held back or dropped to protect the radio
 
 
 class LinkHealth:
@@ -535,6 +544,7 @@ class LinkHealth:
         self.step_times = deque()   # (time, PC processing s)
         self.lost = deque()         # (time, frames lost)
         self.stale = deque()        # (time, frames skipped as stale)
+        self.throttled = deque()    # Time of each motor frame held back or dropped
         self.sent_at = {}           # Motor seq -> time sent
         self.last_seq = None
         self.last_ack = io.NO_SEQ
@@ -561,10 +571,15 @@ class LinkHealth:
         if count:
             self.stale.append((now, count))
 
+    def motor_throttled(self, now):
+        self.throttled.append(now)
+
     def _trim(self, now):
         cutoff = now - HEALTH_WINDOW_S
         while self.steps and self.steps[0] < cutoff:
             self.steps.popleft()
+        while self.throttled and self.throttled[0] < cutoff:
+            self.throttled.popleft()
         for samples in (self.trips, self.step_times, self.lost, self.stale):
             while samples and samples[0][0] < cutoff:
                 samples.popleft()
@@ -580,7 +595,8 @@ class LinkHealth:
             round_trip_max_ms=max(trips, default=0.0),
             step_ms=max((s * 1000 for _, s in self.step_times), default=0.0),
             lost_frames=sum(count for _, count in self.lost),
-            stale_frames=sum(count for _, count in self.stale))
+            stale_frames=sum(count for _, count in self.stale),
+            throttled=len(self.throttled))
 
 
 @dataclass
@@ -749,6 +765,7 @@ class PcBrainLink:
         self.link_log = LinkLog(time.perf_counter())
         self.sent_dacs = None           # Last DAC codes written to the radio
         self.sent_time = 0.0
+        self.motor_pending = False     # Newer codes were held back and still need sending
 
     @property
     def is_open(self):
@@ -757,11 +774,13 @@ class PcBrainLink:
     def open(self, device):
         self.port = xb.open_port(device, BAUD_RATE)     # No Arduino reset on open
         self.port.timeout = READ_WAKE_TIMEOUT_S
+        self.port.write_timeout = WRITE_TIMEOUT_S
         self.parser = io.SensorParser()
         self.link_health = LinkHealth()
         self.link_log = LinkLog(time.perf_counter())
         self.brain.dropouts = 0
         self.sent_dacs = None
+        self.motor_pending = False
         self.tuning_dirty = True
         self.reading = True
         self.reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -789,24 +808,54 @@ class PcBrainLink:
                 self.tuning_dirty = True
             # Only a command that changed the motors (STOP, calibrate) goes on air
             # at once; heartbeats and tuning cost no radio traffic.
-            return self._send_motors(now) is not False
+            # STOP must not wait for the throttle.
+            return self._send_motors(now, force=command == p.CMD_STOP) is not False
 
     def _send_motors(self, now, force=False):
-        """Writes the DAC codes if they changed or the keepalive is due.
-        Returns None if nothing needed sending. Caller holds self.lock."""
+        """Writes the DAC codes if they changed or the keepalive is due, unless that
+        would push the radio past its limits (force skips the checks). Returns
+        None if nothing was sent. Caller holds self.lock."""
         dacs = (self.brain.dac_left, self.brain.dac_right)
-        if not force and dacs == self.sent_dacs and now - self.sent_time < KEEPALIVE_S:
-            return None
+        if not force:
+            if dacs == self.sent_dacs and now - self.sent_time < KEEPALIVE_S:
+                self.motor_pending = False
+                return None
+            if now - self.sent_time < MIN_MOTOR_GAP_S or self._tx_backlog() > MAX_TX_BACKLOG_BYTES:
+                # Too soon, or the XBee is not draining: hold the newest codes and
+                # send them once there is room, rather than queueing old ones.
+                self.motor_pending = True
+                self.link_health.motor_throttled(now)
+                return None
         self.motor_seq = (self.motor_seq + 1) % io.SEQ_COUNT
         try:
             self.port.write(io.encode_motors(*dacs, self.motor_seq))
+        except serial.SerialTimeoutException:
+            self.port.reset_output_buffer()     # Drop the stuck bytes; the rover resyncs
+            self.motor_pending = True
+            self.link_health.motor_throttled(now)
+            return None
         except (serial.SerialException, AttributeError):
             return False
+        self.motor_pending = False
         self.sent_dacs = dacs
         self.sent_time = now
         self.link_health.motor_sent(self.motor_seq, now)
         self.link_log.motor_sent()
         return True
+
+    def _tx_backlog(self):
+        """Bytes written but not yet sent to the XBee (0 if the port cannot say)."""
+        try:
+            return self.port.out_waiting
+        except (serial.SerialException, AttributeError, OSError, NotImplementedError):
+            return 0
+
+    def _flush_pending(self):
+        """Sends codes that _send_motors held back, without waiting for the rover's
+        next sensor frame. Never sends keepalives, so a silent rover is left alone."""
+        with self.lock:
+            if self.motor_pending and self.is_open:
+                self._send_motors(time.perf_counter())
 
     def _read_loop(self):
         while self.reading:
@@ -820,6 +869,8 @@ class PcBrainLink:
             frames = self.parser.feed(data) if data else []
             if frames:
                 self._on_sensors(frames)
+            elif self.motor_pending:
+                self._flush_pending()
 
     def _on_sensors(self, frames):
         """frames arrived together (the radio can bunch them up). Only the newest

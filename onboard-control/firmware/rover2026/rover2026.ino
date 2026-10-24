@@ -455,8 +455,7 @@ int dutyToSpeed(int duty) {
 // steers back onto the line. Between WHITE_BELOW and BLACK_ABOVE a sensor
 // counts as still on the line. steerSign = -1 swaps the sides if this steers
 // the wrong way on test. There is no lost-line search here: with both sensors
-// black in Clockwise mode the rover turns gently right (CW_BOTH_BLACK_RIGHT_DUTY);
-// in other modes it keeps its last wheel command (or the centred levels at the
+// black the rover keeps its last wheel command (or the centred levels at the
 // start of a run, before it has made one) until a sensor sees the line again.
 void updateBangBang(unsigned long now) {
   const ModeTuning& tuning = liveTuning[mode];
@@ -465,10 +464,6 @@ void updateBangBang(unsigned long now) {
   bool leftBlack = normLevel[SENSOR_LEFT] > BLACK_ABOVE;
   bool rightBlack = normLevel[SENSOR_RIGHT] > BLACK_ABOVE;
   if (leftBlack && rightBlack) controlState = STATE_BANG_BOTH_BLACK;
-  if (leftBlack && rightBlack && mode == MODE_CLOCKWISE) {
-    setWheelSpeeds(dutyToSpeed(tuning.pwmStraightLeft), dutyToSpeed(CW_BOTH_BLACK_RIGHT_DUTY));
-    return;
-  }
   if (leftBlack && rightBlack && (lastLeftPercent != 0 || lastRightPercent != 0)) return;
   if (tuning.steerSign < 0) {
     bool swap = leftBlack;

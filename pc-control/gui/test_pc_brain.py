@@ -2,6 +2,7 @@
 Run from this folder: python -m unittest test_pc_brain
 """
 
+import time
 import unittest
 
 import io_protocol as io
@@ -229,6 +230,7 @@ class FakePort:
 
     def __init__(self):
         self.written = []
+        self.out_waiting = 0
 
     def write(self, data):
         self.written.append(bytes(data))
@@ -269,6 +271,49 @@ class LinkTests(unittest.TestCase):
         self.link.sent_time -= pb.KEEPALIVE_S
         self.link._on_sensors([self.frame(2)])
         self.assertEqual(len(self.link.port.written), sent + 1)
+
+    def test_motor_frames_are_rate_limited_and_newest_wins(self):
+        self.link.send(p.CMD_START)
+        self.link._on_sensors([self.frame(0)])
+        sent = len(self.link.port.written)
+        self.link.sent_time = time.perf_counter()       # Just sent a frame
+        self.link._on_sensors([self.frame(1, WHITE, BLACK)])   # DACs change, but too soon
+        self.assertEqual(len(self.link.port.written), sent)
+        self.assertTrue(self.link.motor_pending)
+        self.assertGreaterEqual(self.link.health().throttled, 1)
+        self.link.sent_time -= pb.MIN_MOTOR_GAP_S
+        self.link._flush_pending()
+        self.assertEqual(len(self.link.port.written), sent + 1)
+        self.assertFalse(self.link.motor_pending)
+
+    def test_full_tx_buffer_holds_frames_back(self):
+        self.link.send(p.CMD_START)
+        self.link.port.written.clear()
+        self.link.sent_time = 0.0
+        self.link.port.out_waiting = pb.MAX_TX_BACKLOG_BYTES + 1
+        self.link._on_sensors([self.frame(0, WHITE, BLACK)])
+        self.assertEqual(self.link.port.written, [])
+        self.link.port.out_waiting = 0                  # XBee drained
+        self.link._flush_pending()
+        self.assertEqual(len(self.link.port.written), 1)
+
+    def test_stop_ignores_the_throttle(self):
+        self.link.send(p.CMD_START)
+        self.link._on_sensors([self.frame(0)])
+        self.link.sent_time = time.perf_counter()
+        self.link.port.out_waiting = 999
+        self.link.send(p.CMD_STOP)
+        self.assertEqual(self.link.port.written[-1][2:4], bytes([128, 128]))
+
+    def test_pending_flush_never_sends_keepalives(self):
+        self.link._flush_pending()
+        self.assertEqual(self.link.port.written, [])
+
+    def test_parser_buffer_is_capped(self):
+        parser = io.SensorParser()
+        parser.feed(bytes([1]) * (io.MAX_BUFFER_BYTES * 3))
+        self.assertLessEqual(len(parser.buffer), io.MAX_BUFFER_BYTES)
+        self.assertEqual(len(parser.feed(sensor_frame(400, 800))), 1)   # Still resyncs
 
 
 if __name__ == "__main__":

@@ -86,7 +86,7 @@ DEFAULT_LOG_FILE = "run-log.csv"
 # notes = the tuning used (written by the GUI); note = what the operator typed after the run.
 RUN_LOG_HEADER = ["date", "division", "attempt", "time_s", "result", "notes", "track", "note"]
 TRACKS = ("Test", "Competition")   # Runs and optimiser ratings are kept apart per track
-SESSION_FILE = "session.json"   # The last selected track
+SESSION_FILE = "session.json"   # The last selected track and mode
 NOTE_WIDTH = 34                 # Characters
 TUNING_FILE = "tuning.json"     # In SETTINGS_DIR, one entry per mode
 PWM_FILE = "pwm_levels.json"    # Bang-bang wheel levels from the PWM test window, one entry per mode
@@ -96,6 +96,7 @@ OPTIMISER_FILE = "optimizer.json"  # Every rated run
 XBEE_FILE = "xbee.json"         # Pair XBees: PAN ID and both serial numbers
 PAIR_POLL_MS = 50
 TUNING_CONFIRM_S = 0.6          # Wait this long for the rover to echo a change
+MODE_RESEND_S = 0.6             # Gap between attempts to put the rover back in the session mode
 # Hotkey pairs (increase, decrease) for the tuning slots of the current controller.
 TUNING_KEYS = (("q", "a"), ("w", "s"), ("e", "d"), ("r", "f"))
 TUNING_SLOTS = {
@@ -258,8 +259,11 @@ class RoverGUI:
         self.rate_window_start = time.monotonic()
         self.telemetry_rate = 0
 
-        self.selected_mode = tk.IntVar(value=p.MODE_CLOCKWISE)
-        self.selected_controller = tk.IntVar(value=p.CONTROLLER_PID)
+        session = self._load_session()
+        mode = session.get("mode")
+        self.selected_mode = tk.IntVar(value=mode if mode in p.MODE_NAMES else p.MODE_CLOCKWISE)
+        self.mode_sent = 0.0            # Last time the session mode was re-sent to the rover
+        self.selected_controller = tk.IntVar(value=p.CONTROLLER_BANG_BANG)
         self.run_start = None
         self.run_mode = None
         self.was_calibrating = False
@@ -284,7 +288,7 @@ class RoverGUI:
         self.sample_path = None
         self.unrated_run = None         # Last finished run, waiting for Y / N
         self.optimiser_note = ""
-        self.track_name = tk.StringVar(value=self._load_session().get("track", TRACKS[0]))
+        self.track_name = tk.StringVar(value=session.get("track", TRACKS[0]))
         self.run_track = None           # Track of the run in progress
         self.last_log_row = None        # run-log.csv row of the last run, for its note
         self.last_history_item = None
@@ -909,7 +913,8 @@ class RoverGUI:
     def _save_session(self):
         try:
             with open(self._session_path(), "w", encoding="utf-8") as session_file:
-                json.dump({"track": self.track_name.get()}, session_file, indent=2)
+                json.dump({"track": self.track_name.get(), "mode": self.selected_mode.get()},
+                          session_file, indent=2)
         except OSError as error:
             self.log_label.config(text=f"Could not save {SESSION_FILE}: {error}")
 
@@ -919,6 +924,18 @@ class RoverGUI:
             return
         self.selected_mode.set(mode)
         self.link.send(p.CMD_SET_MODE, mode)
+        self._save_session()
+
+    def _keep_session_mode(self, t):
+        """The GUI's selected mode is the session's mode. A rover that comes back
+        from a link drop may have reset to Clockwise, so while it is stopped it is
+        put back in the selected mode instead of the GUI following it."""
+        mode = self.selected_mode.get()
+        if t.running or t.mode == mode:
+            return
+        now = time.monotonic()
+        if now - self.mode_sent > MODE_RESEND_S and self.link.send(p.CMD_SET_MODE, mode):
+            self.mode_sent = now
 
     def select_controller(self, controller):
         """Steering controller for the current mode, also while running."""
@@ -1458,8 +1475,7 @@ class RoverGUI:
         self.detail_label.config(text="   ".join(flags))
         self.speed_label.config(text=f"Base speed: {t.speed} %")
         self._update_wheels(t)
-        if not t.running and self.selected_mode.get() != t.mode:
-            self.selected_mode.set(t.mode)
+        self._keep_session_mode(t)
         if self.tuning is not None and self.selected_controller.get() != self._controller():
             self.selected_controller.set(self._controller())
         self._update_readout(t)
@@ -1480,7 +1496,7 @@ class RoverGUI:
     def _controller(self):
         """The controller in use, or the one just asked for with T until the rover echoes it."""
         if self.tuning is None:
-            return p.CONTROLLER_PID
+            return p.CONTROLLER_BANG_BANG
         if self.controller_target is not None:
             return self.controller_target
         return self.tuning.controller

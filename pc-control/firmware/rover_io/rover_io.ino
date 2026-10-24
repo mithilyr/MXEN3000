@@ -22,6 +22,11 @@
 const unsigned long LINK_BAUD = 38400;      // BD = 5, per the XBee Pairing Guide
 const unsigned long SENSOR_PERIOD_MS = 25;  // 40 Hz, one control step on the PC
 const unsigned long LINK_TIMEOUT_MS = 300;  // No motor frame for this long = neutral
+// Overflow protection: while no motor frame is arriving (PC closed, out of range)
+// nobody is acting on the sensor frames, so send them slowly. Streaming at 40 Hz
+// into a dead link fills the XBee's buffer and makes it drop off the network.
+// The PC answers every sensor frame, so the fast rate resumes at the first reply.
+const unsigned long IDLE_SENSOR_PERIOD_MS = 200;
 
 // ---- Frames ----
 const byte FRAME_START = 0xFF;
@@ -123,7 +128,22 @@ void pollLink(unsigned long now) {
   }
 }
 
+// True if the serial transmit buffer can take a whole frame. A full buffer means
+// the XBee is not accepting bytes (radio stalled); writing anyway would block
+// the loop and stop the motor watchdog. SoftwareSerial sends without a buffer.
+bool linkHasRoom() {
+#if LINK_USE_SOFTWARE_SERIAL
+  return true;
+#else
+  return Serial.availableForWrite() >= SENSOR_FRAME_LENGTH;
+#endif
+}
+
 void sendSensors() {
+  if (!linkHasRoom()) {
+    sensorSeq = (sensorSeq + 1) % SEQ_COUNT;    // Skipped frame: the PC counts it as lost
+    return;
+  }
   byte frame[SENSOR_FRAME_LENGTH] = {
     FRAME_START, MSG_SENSORS,
     readSensor(IR_LEFT_PIN), readSensor(IR_RIGHT_PIN),
@@ -151,11 +171,13 @@ void loop() {
   unsigned long now = millis();
   pollLink(now);
 
-  if (now - lastMotorFrameMs > LINK_TIMEOUT_MS) {
-    setDacs(DAC_NEUTRAL, DAC_NEUTRAL);      // No-op once already neutral
+  bool linkAlive = now - lastMotorFrameMs <= LINK_TIMEOUT_MS;
+  if (!linkAlive && (dacLeft != DAC_NEUTRAL || dacRight != DAC_NEUTRAL)) {
+    setDacs(DAC_NEUTRAL, DAC_NEUTRAL);
   }
 
-  if (now - lastSensorMs >= SENSOR_PERIOD_MS) {
+  unsigned long sensorPeriod = linkAlive ? SENSOR_PERIOD_MS : IDLE_SENSOR_PERIOD_MS;
+  if (now - lastSensorMs >= sensorPeriod) {
     lastSensorMs = now;
     sendSensors();
   }

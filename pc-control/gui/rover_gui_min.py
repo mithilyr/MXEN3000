@@ -365,8 +365,7 @@ class PlainRoverGUI(gui.RoverGUI):
         self._set_widget(self.detail_label, text="LINE LOST" if t.line_lost else "",
                          foreground=RED)
         self._set_widget(self.speed_label, text=bracket("SPEED", f"{t.speed:3d} %"))
-        if not t.running and self.selected_mode.get() != t.mode:
-            self.selected_mode.set(t.mode)
+        self._keep_session_mode(t)
         if self.tuning is not None and self.selected_controller.get() != self._controller():
             self.selected_controller.set(self._controller())
 

@@ -26,6 +26,7 @@ MOTOR_FRAME_LENGTH = 6
 SEQ_COUNT = 254             # seq runs 0..253
 NO_SEQ = DATA_MAX
 
+MAX_BUFFER_BYTES = SENSOR_FRAME_LENGTH * 20   # Cap on unparsed bytes (about half a second of frames)
 ADC_TO_BYTE_SCALE = 4       # The rover sends the 10-bit ADC reading >> 2
 DAC_FULL_SCALE = 255
 
@@ -76,9 +77,15 @@ class SensorParser:
     def __init__(self):
         self.buffer = bytearray()
         self.checksum_errors = 0
+        self.overflows = 0          # Times the buffer hit MAX_BUFFER_BYTES
 
     def feed(self, data):
         self.buffer.extend(data)
+        if len(self.buffer) > MAX_BUFFER_BYTES:
+            # Far behind the radio: the oldest bytes describe the past, so keep
+            # only the newest and resync on the next FRAME_START.
+            del self.buffer[:-MAX_BUFFER_BYTES]
+            self.overflows += 1
         frames = []
         while True:
             start = self.buffer.find(FRAME_START)

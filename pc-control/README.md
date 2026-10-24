@@ -93,9 +93,25 @@ below, so copy them only if you want the onboard test-day values back.
   reports it applied).
 - **Link health** over the last 2 s, green / orange / red: control rate (Hz),
   radio round trip (ms, median and max), lost sensor frames, bunched frames,
-  dropouts ridden through (since connect), PC step time.
+  throttled motor frames, dropouts ridden through (since connect), PC step time.
 - **Verdict line:** says when the loop is healthy enough to try
   `SENSOR_PERIOD_MS 20` in `rover_io.ino`, or when the radio is dropping frames.
+
+## Overflow protection (keeps the XBees connected)
+
+The XBees have no flow control, so both sides limit their own output:
+
+- **PC:** at most one motor frame per `MIN_MOTOR_GAP_S` (40 ms); while the OS
+  transmit buffer holds more than `MAX_TX_BACKLOG_BYTES` the frame is held back
+  and only the newest codes are sent once it drains; a stuck write times out
+  after `WRITE_TIMEOUT_S` and the buffer is flushed instead of blocking the loop;
+  the receive buffer is capped at `MAX_BUFFER_BYTES`. Esc/STOP always goes at once.
+  Held-back frames show as **Throttled** in the link health.
+- **Rover:** a sensor frame is skipped (and counted as lost) if the serial
+  transmit buffer cannot take it whole, and while no motor frame arrives (PC
+  closed, out of range) sensor frames drop from 40 Hz to 5 Hz
+  (`IDLE_SENSOR_PERIOD_MS`) so a dead link is not flooded. The fast rate
+  resumes at the first reply. Re-flash `rover_io.ino` to get this.
 
 ## Expect on the track
 
@@ -103,8 +119,9 @@ The control loop runs at about 40 Hz over the radio (Version A: 200 Hz on the
 Nano), plus one radio round trip of delay. The starting tuning in
 `pc_brain.py` allows for that:
 
-- Clockwise **and Anticlockwise** use bang-bang (least affected by delay);
-  Anticlockwise mirrors the Clockwise duty levels (70 / 70, slow side 55).
+- All four modes start on bang-bang (least affected by delay); PID and
+  adaptive stay available with `T`. Clockwise, Anticlockwise and Squiggle use
+  duty levels 90 / 90, slow side 55; Reverse uses 30 / 30, slow side 45.
 - PID `kd` is halved in every mode; Squiggle's base speed is 30 % (was 35).
 
 The loop times itself with `time.perf_counter()`: on Windows
