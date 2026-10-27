@@ -35,18 +35,25 @@ Both use the same hardware, wiring, XBee pairing (38400 baud) and GUI keys.
 Flash the firmware that matches the GUI you run: the two radio protocols are
 different.
 
-- `rover2026/`
-  - `pc-control/` — Version B: `firmware/rover_io` + `gui/` (controller in `gui/pc_brain.py`)
-  - **`onboard-control/` — Version A (FINAL, used at the demo)**
-    - **`firmware/rover2026_front_reverse/`** — Nano firmware: `rover2026_front_reverse.ino` (main loop, line follower, XBee link), `config.h` (pins, tuning), `protocol.h` (frame format)
-    - **`gui/`** — PC control panel: `rover_gui_front_reverse.py`, helpers (`protocol.py`, `optimizer.py`, `telemetry_stats.py`, `log_guide.py`, `glass.py`, `xbee_setup.py`), unit tests, `requirements.txt`
-    - **`gui/build_exe_front_reverse.bat`** — builds `dist/RoverControl_front_reverse.exe`
-    - **`README.md`** — full build, upload and run guide
-  - `tools/`
-    - **`xbee_bridge/`** — USB <-> XBee pass-through sketch for the GUI's "Pair XBees" window
-    - `track_map/` — `TrackMap.exe`: replays the GUI's ir-log CSVs on the track map
-  - `docs/`
-    - `gui_preview.png` — screenshot of the GUI (simulated data)
+```
+rover2026/
+  pc-control/          Version B: firmware/rover_io + gui/ (controller in gui/pc_brain.py)
+  onboard-control/     Version A (FINAL, used at the demo)
+    firmware/rover2026_front_reverse/
+                       Nano firmware: rover2026_front_reverse.ino (main loop, line follower,
+                       XBee link), config.h (pins, tuning), protocol.h (frame format)
+    gui/               PC control panel: rover_gui_front_reverse.py, helpers (protocol.py,
+                       optimizer.py, telemetry_stats.py, log_guide.py, glass.py, xbee_setup.py),
+                       unit tests, requirements.txt
+    gui/build_exe_front_reverse.bat
+                       builds dist/RoverControl_front_reverse.exe
+    README.md          full build, upload and run guide
+  tools/
+    xbee_bridge/       USB <-> XBee pass-through sketch for the GUI's "Pair XBees" window
+    track_map/         TrackMap.exe: replays the GUI's ir-log CSVs on the track map
+  docs/
+    gui_preview.png    screenshot of the GUI (simulated data)
+```
 
 Run the tests for each version from its `gui/` folder:
 `python -m unittest discover`.
