@@ -1,10 +1,60 @@
 # onboard-control — controller runs on the Nano
 
-> **FINAL DEMO BUILD (27 Oct 2026):** the code used at the final demonstration is
-> `firmware/rover2026_front_reverse/` (Front + Reverse, bang-bang only) with
-> `gui/rover_gui_front_reverse.py` (`gui/build_exe_front_reverse.bat` -> `RoverControl_front_reverse.exe`).
-> `firmware/rover2026/` and `gui/rover_gui.py` are the earlier all-modes build (25 Oct), and
-> `firmware/rover2026_last_working_24.10.2026/` is the 24-Oct fallback; both are kept for reference.
+## FINAL DEMO BUILD (27 Oct 2026) — build and run it on a new PC
+
+The code used at the final demonstration is the **Front + Reverse, bang-bang only** pair:
+
+| Part | File |
+|---|---|
+| Firmware (Nano) | `firmware/rover2026_front_reverse/` (`.ino`, `config.h`, `protocol.h`) |
+| GUI source | `gui/rover_gui_front_reverse.py` |
+| Build script | `gui/build_exe_front_reverse.bat` → `gui/dist/RoverControl_front_reverse.exe` |
+
+`firmware/rover2026/` and `gui/rover_gui.py` are the earlier all-modes build (25 Oct). `firmware/rover2026_last_working_24.10.2026/` is the 24-Oct fallback. Both are kept for reference only. The firmware and the .exe must come from the same pair: the tuning message differs between builds.
+
+### 1. Get the code
+
+```
+git clone https://github.com/mithilyr/MXEN3000.git
+cd MXEN3000/onboard-control
+```
+
+(If you cloned the outer course repo instead, the same folder is `labs/lab4-final-vehicle/code/rover2026/onboard-control`.)
+
+### 2. Upload the firmware (about 5 minutes)
+
+1. Install the Arduino IDE. No extra libraries are needed.
+2. Open `firmware/rover2026_front_reverse/rover2026_front_reverse.ino`. Keep `config.h` and `protocol.h` in the same folder.
+3. Board **Arduino Nano**, processor **ATmega328P** (try "Old Bootloader" if the upload fails), then pick the Nano's COM port.
+4. Switch both levers of DIP switch **S6** off, press **Upload**, then switch S6 back on.
+
+### 3. Build the GUI .exe (about 3 minutes)
+
+Needs Windows and 64-bit **Python 3.10 or newer from python.org** with "Add python.exe to PATH" ticked. Tkinter comes with that installer; the Microsoft Store Python can fail.
+
+1. Open Command Prompt in `gui/`.
+2. Run:
+
+```
+build_exe_front_reverse.bat
+```
+
+The script installs `pyserial`, `pillow` and `pyinstaller` from `requirements.txt`, then runs PyInstaller. The result is `gui\dist\RoverControl_front_reverse.exe` (about 32 MB, one file, no install needed; copy it to any PC). Antivirus may flag it on first run because it is an unsigned PyInstaller file.
+
+All files the build needs are in `gui/`: `rover_gui_front_reverse.py`, `protocol.py`, `glass.py`, `log_guide.py`, `optimizer.py`, `telemetry_stats.py`, `xbee_setup.py`, `requirements.txt`. The `.exe` creates `logs/` and `settings/` next to itself on first run.
+
+No build, just run from source:
+
+```
+pip install -r requirements.txt
+python rover_gui_front_reverse.py
+```
+
+### 4. Run
+
+1. Plug in the PC XBee, start `RoverControl_front_reverse.exe`, pick its COM port, press **Connect**. The top bar turns green ("Link OK").
+2. Keys: `1` Front, `2` Reverse, `Space` start/stop, `Esc` emergency stop.
+3. XBee pairing and sensor calibration are described in "XBee setup" and "Quick start" below.
 
 **Version A** of the rover2026 code: the line-following controller runs on the rover every 5 ms, and the PC GUI only sends commands and tuning. For the version where all duty-cycle processing runs on the PC (the instructor's 20-Oct-2026 requirement), see [`../pc-control/`](../pc-control/README.md).
 
