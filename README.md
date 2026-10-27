@@ -23,13 +23,13 @@ build_exe_front_reverse.bat
 
 ## Versions in this repo
 
-Two complete, separate versions of the rover code, plus archived earlier builds.
+Two complete, separate versions of the rover code. Earlier onboard-control builds were removed on 27 Oct 2026 and are in git history under the tag `pre-cleanup-archive-27oct2026`.
 Each version has its own firmware and its own GUI, and neither imports anything from the other.
 
 | Folder | Where the duty cycles are computed | Nano firmware | PC program |
 |---|---|---|---|
 | [`pc-control/`](pc-control/README.md) | **On the PC** (meets the 20-Oct-2026 instructor rule) | `rover_io.ino` — I/O only | `RoverControlPC.exe` |
-| [`onboard-control/`](onboard-control/README.md) | On the Nano (the original build, used on test days 19–20 Oct) | `rover2026.ino` — full controller | `RoverControl_front_reverse.exe` (final demo), `RoverControlMap.exe` / `RoverControl.exe` (earlier, all modes) |
+| [`onboard-control/`](onboard-control/README.md) | On the Nano (**the final demo build**) | `rover2026.ino` — full controller | `RoverControl_front_reverse.exe` (final demo) |
 
 Both use the same hardware, wiring, XBee pairing (38400 baud) and GUI keys.
 Flash the firmware that matches the GUI you run: the two radio protocols are
@@ -38,7 +38,7 @@ different.
 ```
 rover2026/
   pc-control/        Version B: firmware/rover_io + gui/ (controller in gui/pc_brain.py)
-  onboard-control/   Version A: firmware/rover2026_front_reverse (FINAL), rover2026, rover2026_last_working_24.10.2026 + gui/
+  onboard-control/   Version A (FINAL): firmware/rover2026_front_reverse + gui/
   tools/
     xbee_bridge/     USB <-> XBee pass-through sketch for the GUI's "Pair XBees" window
     track_map/       TrackMap.exe: replays the GUI's ir-log CSVs on the track map

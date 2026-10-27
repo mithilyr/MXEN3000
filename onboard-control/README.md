@@ -10,7 +10,7 @@ The code used at the final demonstration is the **Front + Reverse, bang-bang onl
 | GUI source | `gui/rover_gui_front_reverse.py` |
 | Build script | `gui/build_exe_front_reverse.bat` → `gui/dist/RoverControl_front_reverse.exe` |
 
-`firmware/rover2026/` and `gui/rover_gui.py` are the earlier all-modes build (25 Oct). `firmware/rover2026_last_working_24.10.2026/` is the 24-Oct fallback. Both are kept for reference only. The firmware and the .exe must come from the same pair: the tuning message differs between builds.
+Earlier builds (all modes, PID/adaptive, map GUI, 24-Oct fallback) were removed from this folder on 27 Oct 2026. They are kept in git history under the tag `pre-cleanup-archive-27oct2026` (`git checkout pre-cleanup-archive-27oct2026`).
 
 ### 1. Get the code
 
@@ -54,116 +54,27 @@ python rover_gui_front_reverse.py
 
 1. Plug in the PC XBee, start `RoverControl_front_reverse.exe`, pick its COM port, press **Connect**. The top bar turns green ("Link OK").
 2. Keys: `1` Front, `2` Reverse, `Space` start/stop, `Esc` emergency stop.
-3. XBee pairing and sensor calibration are described in "XBee setup" and "Quick start" below.
+3. Sensor placement, XBee setup and wiring are below.
 
-**Version A** of the rover2026 code: the line-following controller runs on the rover every 5 ms, and the PC GUI only sends commands and tuning. For the version where all duty-cycle processing runs on the PC (the instructor's 20-Oct-2026 requirement), see [`../pc-control/`](../pc-control/README.md).
-
-![Rover 2026 control GUI (RoverControlMap.exe, simulated run): run timer with the top-mark target, track and run note, mode and controller, live sensor chart, tuning, lap optimiser, run history and the estimated track map with the competition scorecard](../docs/gui_preview.png)
-
-*The control GUI, shown with simulated rover data.*
-
-One firmware and one GUI cover all four competition runs: **Clockwise**, **Anticlockwise**, **Squiggle** and **Reverse**. The PC and the rover talk over a pair of XBees in transparent mode. The track is a stadium-shaped white line on a black table.
-
-This is a clean rewrite. It keeps only the ideas from last year's inherited `line_follower` sketch and `serial_gui.py`: the DAC pin map, the 4-byte checksummed command frame, and neutral = 128. No code from `oldfiles/` is used.
+The line-following controller runs on the rover every 5 ms (bang-bang), and the PC GUI only starts/stops it and shows the sensor data. The PC and the rover talk over a pair of XBees in transparent mode. The track is a stadium-shaped white line on a black table. This build covers two runs: **Front** (forward) and **Reverse**.
 
 ```
-firmware/rover2026/
-  rover2026.ino   main loop, line follower, XBee link
-  config.h        pins, XBee options, per-mode tuning table  <- tune here
-  protocol.h      frame format + command numbers (mirrors gui/protocol.py)
+firmware/rover2026_front_reverse/
+  rover2026_front_reverse.ino   main loop, line follower, XBee link
+  config.h                      pins, XBee options, Front/Reverse tuning  <- tune here
+  protocol.h                    frame format + command numbers (mirrors gui/protocol.py)
 gui/
-  rover_gui.py      Tkinter control panel (keyboard driven)
-  rover_gui_map.py  the same panel plus the live track map + scorecard
-  protocol.py       frame encode/decode (mirrors protocol.h)
-  optimizer.py      lap-time optimiser (Bayesian, pure Python) for the GUI
-  track_model.py    dead-reckoning track model for the map tile
-  map_view.py       draws the track map
-  glass.py          window styling
-  xbee_setup.py     the "Pair XBees" window's XBee programming
-  test_*.py         unit tests (python -m unittest discover)
-  build_exe.bat     -> dist/RoverControl.exe
-  build_exe_map.bat -> dist/RoverControlMap.exe (the one used on test day)
+  rover_gui_front_reverse.py    Tkinter control panel (keyboard driven)
+  protocol.py                   frame encode/decode (mirrors protocol.h)
+  optimizer.py, telemetry_stats.py, log_guide.py   GUI helpers
+  glass.py                      window styling
+  xbee_setup.py                 the "Pair XBees" window's XBee programming
+  test_*.py                     unit tests (python -m unittest discover)
+  build_exe_front_reverse.bat   -> dist/RoverControl_front_reverse.exe
   requirements.txt
 ```
 
-## What's new (21 Oct 2026): control telemetry, ROVER view, green terminal look
-
-- **Two new rover → PC frames** (`protocol.h` / `gui/protocol.py`, additive): a 17-byte **debug** frame just before each telemetry frame (controller state, PID P/I/D terms, actual turn, adaptive rate, and for *every* 5 ms step since the last frame: % of steps saturated at max turn, largest |position|, longest step and step-to-step period, step count; plus lost-line count and a sequence number) and an 8-byte **calibration** frame with each tuning frame (white/black levels per side, and whether the last `C` sweep was accepted or rejected).
-- **`RoverControlMap.exe` is now a telemetry dashboard** (the track map is gone; `TrackMap.exe` still replays the logs):
-  - **ROVER** (`gui/rover_view.py`): top-down drawing of our cart (rounded acrylic chassis, green PCB, Nano, XBee, battery holders, treaded side wheels, castor, IR sensors at the nose). An IR sensor lights in its side's colour (left phosphor white, right mint green) and reads "WHITE (line)" while over the line, "BLACK (table)" otherwise; a tyre's tread lights brighter the faster it drives (yellow = backwards); the XBee LED lights while frames arrive; the chassis edge goes light grey when the line is lost. Each part shows its own values beside it, and a turn gauge under the rover shows the turn against ±max turn.
-  - **WAVEFORMS** (`gui/scope_view.py`): last 20 s of IR level L/R, position (grey marks = line lost), PWM duty L/R, and P/I/D and turn (grey marks = steering at max), with each trace's latest value beside its strip.
-  - **DATA**: only what decides the lap time. STATUS: controller state, radio (lost frames, longest gap), calibration result and white/black levels, bang-bang PWM levels. RUN (live, then the last run): time, average speed, average and minimum duty per wheel, RMS/max position, % saturated, lost-line count and time, weave Hz, worst loop period, radio frames lost.
-- **Everything else goes to the logs** (in `logs/` next to the .exe), for analysis later:
-  - `run-stats.csv`: one row per run with the lap figures above plus loop timing, radio gap, checksum errors, bytes/s, commands sent, every tuning value the rover reported (mode, base speed, kp/ki/kd, max turn, bang level, adaptive gain/ramp, bang-bang PWM levels), calibration levels, port, PAN ID and the run's ir-log file name. A file with an older header is renamed to `run-stats_old_<time>.csv`.
-  - `ir-log_*.csv`: one row per telemetry frame: raw and normalised IR, the 1/0 sensor decisions, position, DAC code, duty and speed per wheel, line lost, frame gap, controller state, P/I/D/turn, saturation, loop timing, lost count and debug frame number. The first 8 columns are unchanged, so TrackMap.exe still reads them.
-  - `README-logs.md`: written by the GUI (`gui/log_guide.py`); explains every file and column and how to analyse them for a faster lap.
-- **Green terminal look** (`gui/theme.py`): phosphor green on black, lime accent, white for left and mint for right readings, yellow for warnings, light grey for faults (no orange, red, magenta or cyan); flat outlined boxes, Consolas, 10 Hz refresh. The original exe is kept as `gui/dist/RoverControlMap_before_amber.exe`.
-- **Upload the firmware for the new readings.** With old firmware the GUI still drives the rover, and the DATA box says "NO DEBUG". The old exe with the new firmware counts the new frames as checksum errors but otherwise works.
-
-## What's new (13 Oct 2026)
-
-Ideas taken from [GilbertJ3072/MXEN3000](https://github.com/GilbertJ3072/MXEN3000) and rebuilt to run on the rover, not the PC:
-
-- **3 controllers, one per mode:** PID, Bang-bang or Adaptive 1/0. Press `T` in the GUI to switch, also mid-run. No re-upload needed.
-- **PID got better:** a smoothed derivative (less jitter) and an optional Ki with anti-windup (starts at 0, with a **Reset integral** button).
-- **Lap optimiser:** after each run press `Y` (clean lap) or `N` (failed), then `G` for the next settings to try. `B` loads the best settings so far. It takes small steps and counts failed runs against nearby settings, because a failed run scores 0 in the competition. Full steps are in `gui/README.md` → "Lap optimiser".
-- **Upload the firmware and rebuild the .exe together.** The tuning message changed, so an old GUI can't read the new firmware.
-
-Why past students said "use bang-bang": their PID ran on the PC (about 100 ms late over serial) and read the sensors wrong (10-bit values stored in a byte). Ours runs on the rover every 5 ms, so start with PID and let the lap times decide.
-
-## Quick start
-
-1. Configure both XBees (see "XBee setup" below).
-2. Open `firmware/rover2026/rover2026.ino` in the Arduino IDE. Pick board **Arduino Nano**, processor **ATmega328P**. Switch both levers of DIP switch **S6** off (it disconnects the XBee from D0/D1), upload, then switch S6 back on.
-3. Run `gui/build_exe.bat`, then start `gui/dist/RoverControl.exe`. Alternatively run `python rover_gui.py` from `gui/`.
-4. Pick the PC XBee's COM port and press **Connect**. The top bar turns green ("Link OK ~10 Hz").
-5. Calibrate each IR sensor with its own pot: watch the SENSORS panel's 0-1 bars (1 = white line, 0 = black table). Hold the sensor over the white line and turn its pot until it reads above the right dashed mark (0.94), then check it reads below the left mark (0.30) over the black table. Match left and right. **Reset min/max** clears the min/max/gap columns.
-6. Press **C** and slide the rover slowly across the line by hand for 3 s (software calibration, fine-tunes the 0-1 scaling).
-7. Pick a mode (1–4), put the rover on the line and press **Space** to start.
-
-## Keyboard (the supervisor drives with these)
-
-| Key | Action |
-|---|---|
-| `1` `2` `3` `4` | Clockwise / Anticlockwise / Squiggle / Reverse (only while stopped) |
-| `Space` | Start / stop |
-| `Esc` | Emergency stop (always stops) |
-| `Up` / `Down` | Base speed ±5 % (works live while running) |
-| `C` | Calibrate sensors (only while stopped) |
-| `T` | Next controller for this mode: PID / Bang-bang / Adaptive (also while running) |
-| `Y` / `N` | Rate the last run for the optimiser: clean lap / failed |
-| `G` / `B` | Optimiser: try next settings / use best settings (only while stopped) |
-
-Each run also writes `ir-log_<Mode>_<timestamp>.csv` in the `logs` folder next to the .exe, beside `run-log.csv`, with every telemetry sample (about 20 per second): `time_s, ir_left, ir_right, position, dac_left, dac_right, speed, line_lost`. Use it to plot the IR readings and tune thresholds.
-
-Each run is timed from START to STOP and appended to `run-log.csv`. The columns match `labs/competition/run-log.csv`, so you can paste rows straight across.
-
-## How the control works
-
-- **Sensors.** Each IR reading is normalised to 0 (white) … 1 (black) using the calibrated levels. `position = right − left`. A positive value means the line has moved to the rover's left.
-- **Three controllers, chosen per mode.** The `controller` column of `MODE_TUNING` in `config.h` sets each mode's starting controller, and the GUI can switch it (key `T`, also while running; the new controller starts with a cleared integral) without re-uploading. All three are compiled in. Every mode starts on bang-bang; PID and adaptive are optional and chosen with `T`.
-- **PID steering (the default).** See "Analog steering" below for what `position` means. The derivative is low-pass filtered (`D_FILTER_ALPHA` in `config.h`, about a 25 ms average), because the raw change between two readings 5 ms apart is mostly noise. `ki` starts at 0 (plain PD). Add it only if the rover holds a steady offset on the long curves. The integral is capped so that `ki x integral` alone can never ask for more than `maxTurn` (anti-windup). It resets on START, while the line is lost, and from the GUI's **Reset integral** button.
-- **Bang-bang steering.** Straight while `|position|` is below `bangLevel`, full `maxTurn` towards the line once it goes past. It has only two settings to tune, so it is quick to get working, but it zig-zags more than PID on the straights.
-- **Adaptive steering (lecture 8, "2-sensor control algorithm").** Each sensor is either on the white line or off it. Both off (or both on) means go straight. Line under one sensor means steer towards that side. The turn rate is `adaptGain / (time since the last correction)`, so a rover that has just corrected turns hard, and one that has not corrected for a while turns gently. A second correction on the same side soon after the first adds to the earlier rate. While one correction lasts, the rate also ramps up by `adaptRamp` per second. All numbers are in `config.h`.
-- **Analog steering (PID and bang-bang).** The controller turns `position` into a steering term, which is added to one wheel and subtracted from the other around the base speed. It runs every 5 ms. With the sensors 3 cm apart over the 3 cm line, a centred rover has each sensor on one edge of the line. Sliding sideways by less than 1.5 cm changes `position` smoothly (`position` = +-1 at +-1.5 cm). Between 1.5 and 3 cm one sensor is fully on the line and the other fully off, so `position` stays at +-1. Beyond 3 cm the line has left both sensors and is treated as lost. The GUI shows the approximate offset in cm next to `pos`.
-- **Sensor geometry.** `SENSORS_STRADDLE_LINE` (adaptive controller only). `true` = the sensors sit either side of the line, as in lecture 8, so both off means straight and a lost line cannot be detected. `false` = both sensors sit over the line, so both off means the line is lost.
-- **Sensor polarity.** `WHITE_READS_HIGH` in `config.h`. The sensor board has a 10k pull-up on each sensor output, so a sensor over the white line (lots of reflected light) reads LOW and black reads HIGH. That is the default (`false`). Set it to `true` only if a sensor over the line reads HIGH in the GUI's IR numbers.
-- **PWM test window (GUI button "PWM test").** Sets the Bang-bang controller's four wheel levels for the current mode as electrical PWM duty (100 % = full forward, 50 % = stopped, 0 % = full reverse), in 5 % steps: left and right with the line centred, and left and right while slowed to turn. Changes apply live, also while running, are saved per mode in `settings\pwm_levels.json` next to the .exe, and are re-sent after a connect or mode change. Defaults are the `pwm*` columns of `MODE_TUNING`. PID and Adaptive ignore them.
-- **Lost line.** Bang-bang has no lost-line search: with both sensors black it keeps its last wheel command until a sensor sees the line. For the others: when the line is lost (PID: both sensors on black; adaptive with `SENSORS_STRADDLE_LINE false`: both off the line), the rover first backtracks: it replays its last 0.6 s of wheel commands in reverse to retrace its path (`BACKTRACK_SAMPLES` / `BACKTRACK_SAMPLE_MS` in `config.h`), stopping as soon as a sensor sees the line. If the history runs out, it spins in place towards the side it last saw the line on (at the very start of a run, with no history, towards the mode's track direction). It keeps spinning until it finds the line or you send STOP; there is no lost-line timeout.
-- **Reverse.** Same controller, but the base speed is negative. The sensors stay at the front (now the trailing end), so this mode runs slower with more damping. `steerSign` in `config.h` flips the steering if testing shows it correcting the wrong way.
-- **No link failsafe.** Once started, the rover keeps running through radio dropouts until it receives a STOP command or loses the line. Reconnect and press Esc/Space to stop it.
-- **Status LED (D13).** Solid = running. Off = stopped.
-
-## Tuning order (about 30 minutes per mode)
-
-All numbers are in `config.h` → `MODE_TUNING`. The current values are starting guesses.
-
-1. Bench test first (GUI "Bench test" panel, rover lifted). Set each motor to 0 V (DAC 128) and confirm the wheel is still. Send about +6 V (DAC 180) and confirm the wheel drives forwards. If it goes backwards, flip `LEFT_MOTOR_DIR` / `RIGHT_MOTOR_DIR`.
-2. Clockwise at base 30 %. Raise `kp` until the rover oscillates on the straights, then back off by a third.
-3. Raise `kd` until the oscillation on curve entry stops. If the rover still sits off-centre on the long curves, raise `ki` in steps of 5. (Bang-bang: lower `bangLevel` until it reacts early enough on the curves, then lower `maxTurn` until it stops zig-zagging. Adaptive: raise the turn gain until the rover corrects fast enough on the curves, lower it if it zig-zags on the straights.)
-4. To compare controllers, run the same mode with each one (key `T`). Each run's controller and settings go in the run log's notes column.
-5. Raise base speed with `Up` during runs. Change the gains live from the GUI's TUNING panel (see `gui/README.md`). Press **Copy for config.h** and paste the best values into `MODE_TUNING`.
-6. Repeat for the other modes. Squiggle needs higher gains. Reverse needs lower speed.
+The version where all duty-cycle processing runs on the PC is in [`../pc-control/`](../pc-control/README.md).
 
 ## Sensor placement (2 sensors only)
 
@@ -210,11 +121,3 @@ The firmware (`LINK_BAUD` in `config.h`) and the GUI both use 38400 to match.
 - **IR sensors:** connector J8 = GND, A6, A7, 5 V (LED supply through R2 180 Ω). A6 and A7 have 10 kΩ pull-ups (R3, R4) and no comparator, so the readings are analog: white line = low, black table = high (`WHITE_READS_HIGH false`). The firmware calls A6 left and A7 right; if the GUI shows them swapped, swap `IR_LEFT_PIN` / `IR_RIGHT_PIN`.
 - **PWM jumpers (not set by firmware):** each DAC output must reach the LM393 comparator against the ramp. Board 1: J7 on 1-2 (DAC → +RAMP1), J1 on 2-3, J5 on 2-3 (ramp, not +5 V). Board 2: J12 on 1-2 (-RAMP2). With the wrong jumpers a wheel ignores its DAC.
 - **Power:** the Nano runs from VIN (L7809 + diode D1); the motor stages from the ±15 V input J14. DAC 128 ≈ 50 % duty ≈ 0 V at the motor.
-
-## Checks done
-
-- Firmware compiles for Arduino Nano (arduino-cli, `--warnings all`) with no warnings: 8.7 kB of 30 kB, 595 B of 2 kB RAM (checked 2026-10-13, all three controllers compiled in).
-- Pin map re-checked against `labs/lab4-final-vehicle/PCB_Circuits_Diagrams (1).pdf` (board 1 netlist) and `docs/pcb details/sch3.pdf` (board 2) on 2026-10-06.
-- `python test_protocol.py`: 13 protocol tests pass (framing, checksum, resync after garbage, tuning frame). `python test_optimizer.py`: 8 tests pass, including a simulated track where 20 runs cut the lap time by more than 15 % (checked 2026-10-13).
-- The GUI exercised with simulated telemetry (mode change, speed, start, line-lost auto-stop, CSV log), and `build_exe.bat` produces an ~11 MB `RoverControl.exe`.
-- **Not yet run on the real rover or radios.**
