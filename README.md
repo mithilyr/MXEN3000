@@ -1,12 +1,35 @@
 # rover2026 — wireless line-following rover (MXEN3000, S2 2026)
 
-Two complete, separate versions of the rover code. Each one has its own
-firmware and its own GUI, and neither imports anything from the other.
+> **Final demo build (27 Oct 2026):** the code used at the final demonstration is the
+> **Front + Reverse, bang-bang only** pair in [`onboard-control/`](onboard-control/README.md):
+> firmware `onboard-control/firmware/rover2026_front_reverse/` and GUI
+> `onboard-control/gui/rover_gui_front_reverse.py`. The .exe is not stored in git; build it
+> with `onboard-control/gui/build_exe_front_reverse.bat`.
+
+## Build the final demo GUI (about 3 minutes)
+
+1. Install 64-bit Python 3.10 or newer from python.org (tick "Add python.exe to PATH").
+2. Clone and build:
+
+```
+git clone https://github.com/mithilyr/MXEN3000.git
+cd MXEN3000\onboard-control\gui
+build_exe_front_reverse.bat
+```
+
+3. Run `dist\RoverControl_front_reverse.exe`. To upload the matching firmware to the Nano,
+   open `onboard-control/firmware/rover2026_front_reverse/rover2026_front_reverse.ino` in the
+   Arduino IDE. Full steps: [`onboard-control/README.md`](onboard-control/README.md).
+
+## Versions in this repo
+
+Two complete, separate versions of the rover code, plus archived earlier builds.
+Each version has its own firmware and its own GUI, and neither imports anything from the other.
 
 | Folder | Where the duty cycles are computed | Nano firmware | PC program |
 |---|---|---|---|
 | [`pc-control/`](pc-control/README.md) | **On the PC** (meets the 20-Oct-2026 instructor rule) | `rover_io.ino` — I/O only | `RoverControlPC.exe` |
-| [`onboard-control/`](onboard-control/README.md) | On the Nano (the original build, used on test days 19–20 Oct) | `rover2026.ino` — full controller | `RoverControlMap.exe` / `RoverControl.exe` |
+| [`onboard-control/`](onboard-control/README.md) | On the Nano (the original build, used on test days 19–20 Oct) | `rover2026.ino` — full controller | `RoverControl_front_reverse.exe` (final demo), `RoverControlMap.exe` / `RoverControl.exe` (earlier, all modes) |
 
 Both use the same hardware, wiring, XBee pairing (38400 baud) and GUI keys.
 Flash the firmware that matches the GUI you run: the two radio protocols are
@@ -15,7 +38,7 @@ different.
 ```
 rover2026/
   pc-control/        Version B: firmware/rover_io + gui/ (controller in gui/pc_brain.py)
-  onboard-control/   Version A: firmware/rover2026 + gui/ (controller in the .ino)
+  onboard-control/   Version A: firmware/rover2026_front_reverse (FINAL), rover2026, rover2026_last_working_24.10.2026 + gui/
   tools/
     xbee_bridge/     USB <-> XBee pass-through sketch for the GUI's "Pair XBees" window
     track_map/       TrackMap.exe: replays the GUI's ir-log CSVs on the track map
