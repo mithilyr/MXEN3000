@@ -1,5 +1,11 @@
 # onboard-control — controller runs on the Nano
 
+> **FINAL DEMO BUILD (27 Oct 2026):** the code used at the final demonstration is
+> `firmware/rover2026_front_reverse/` (Front + Reverse, bang-bang only) with
+> `gui/rover_gui_front_reverse.py` (`gui/build_exe_front_reverse.bat` -> `RoverControl_front_reverse.exe`).
+> `firmware/rover2026/` and `gui/rover_gui.py` are the earlier all-modes build (25 Oct), and
+> `firmware/rover2026_last_working_24.10.2026/` is the 24-Oct fallback; both are kept for reference.
+
 **Version A** of the rover2026 code: the line-following controller runs on the rover every 5 ms, and the PC GUI only sends commands and tuning. For the version where all duty-cycle processing runs on the PC (the instructor's 20-Oct-2026 requirement), see [`../pc-control/`](../pc-control/README.md).
 
 ![Rover 2026 control GUI (RoverControlMap.exe, simulated run): run timer with the top-mark target, track and run note, mode and controller, live sensor chart, tuning, lap optimiser, run history and the estimated track map with the competition scorecard](../docs/gui_preview.png)
