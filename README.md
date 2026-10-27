@@ -29,7 +29,7 @@ Each version has its own firmware and its own GUI, and neither imports anything 
 | Folder | Where the duty cycles are computed | Nano firmware | PC program |
 |---|---|---|---|
 | [`pc-control/`](pc-control/README.md) | **On the PC** (meets the 20-Oct-2026 instructor rule) | `rover_io.ino` — I/O only | `RoverControlPC.exe` |
-| [`onboard-control/`](onboard-control/README.md) | On the Nano (**the final demo build**) | `rover2026.ino` — full controller | `RoverControl_front_reverse.exe` (final demo) |
+| [`onboard-control/`](onboard-control/README.md) | On the Nano (**the final demo build**) | `rover2026_front_reverse.ino` — controller on the Nano | `RoverControl_front_reverse.exe` |
 
 Both use the same hardware, wiring, XBee pairing (38400 baud) and GUI keys.
 Flash the firmware that matches the GUI you run: the two radio protocols are
