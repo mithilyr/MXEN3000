@@ -168,6 +168,12 @@ constexpr float CORNER_HOLD_TURN = 0.6f;
 
 constexpr int SPEED_MAX = 100;              // Speeds are % of DAC_SPAN
 
+// Soft start: for this long after START (or after a reset mid-run) the wheel
+// commands are scaled up from 0 to full. Both motors jumping from stop to 80 %
+// at once pulled the supply down far enough to reset the Nano (25-Oct logs:
+// debug seq restarted ~0.2 s after START). 0 = off.
+constexpr unsigned long SOFT_START_MS = 300;
+
 // Turn direction convention: +1 = clockwise (to the right), -1 = anticlockwise.
 constexpr int TURN_CLOCKWISE = 1;
 constexpr int TURN_ANTICLOCKWISE = -1;

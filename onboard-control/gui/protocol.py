@@ -63,6 +63,7 @@ FRAME_LENGTHS = {MSG_TELEMETRY: TELEMETRY_FRAME_LENGTH, MSG_TUNING: TUNING_FRAME
 SIGNED_OFFSET = 127         # Signed debug values are sent as value + SIGNED_OFFSET
 SEQ_COUNT = 254             # Debug seq runs 0..253
 DEBUG_SATURATED = 0x01
+DEBUG_RESUMED = 0x02        # The run was carried on through a Nano reset
 
 STATUS_RUNNING = 0x01
 STATUS_LINE_LOST = 0x02
@@ -99,6 +100,7 @@ STATE_BANG_STRAIGHT = 8
 STATE_BANG_LEFT = 9
 STATE_BANG_RIGHT = 10
 STATE_BANG_BOTH_BLACK = 11
+STATE_BANG_REALIGN = 12     # Back on white after both-black, still turning until aligned
 STATE_NAMES = {
     STATE_IDLE: "IDLE",
     STATE_CALIBRATING: "CALIBRATING",
@@ -112,6 +114,7 @@ STATE_NAMES = {
     STATE_BANG_LEFT: "BANG TURN LEFT",
     STATE_BANG_RIGHT: "BANG TURN RIGHT",
     STATE_BANG_BOTH_BLACK: "BANG BOTH BLACK",
+    STATE_BANG_REALIGN: "BANG REALIGN",
 }
 LOST_STATES = (STATE_BACKTRACK, STATE_SPIN, STATE_CORNER_SWEEP)
 
@@ -270,6 +273,7 @@ class Debug:
     period_max_ms: float  # Window: longest time between control steps
     lost_events: int    # Times the line was lost this run
     saturated: bool     # Clamped on the last step
+    resumed: bool = False  # Rover reset mid-run and carried the run on
 
 
 def decode_debug(frame):
@@ -288,6 +292,7 @@ def decode_debug(frame):
         period_max_ms=tenths_ms(frame[13]),
         lost_events=frame[14],
         saturated=bool(frame[15] & DEBUG_SATURATED),
+        resumed=bool(frame[15] & DEBUG_RESUMED),
     )
 
 

@@ -13,8 +13,11 @@
 // rover spins towards the side it last saw the line on, and keeps searching
 // until it finds the line again or the GUI sends STOP.
 //
-// Safety: motors sit at neutral until START. Once started, the rover keeps
-// running through radio dropouts until it gets a STOP command (or loses the line).
+// Start / stop: motors sit at neutral until START. Once started, the rover keeps
+// running through radio dropouts and lost lines until it gets a STOP command
+// (sent only when the operator presses Space in the GUI). Nothing on the rover
+// stops a run by itself. A brown-out reset mid-run does not stop it either:
+// the run state survives in .noinit RAM and setup() carries the run on.
 
 #include "config.h"
 #include "protocol.h"
@@ -51,6 +54,10 @@ bool sensorWhite[SENSOR_COUNT] = {false, false};  // Steady 1/0: true = on the w
 float position = 0.0f;
 float lastPosition = 0.0f;
 int lastTurn = TURN_CLOCKWISE;
+// Bang-bang: the sensor that was last on white while the other was black. With
+// both on black the rover turns towards this side.
+byte lastWhiteSide = SENSOR_RIGHT;
+bool bangRealign = false;  // Back on white after both-black: keep turning until aligned
 
 // ---- PID state ----
 float integral = 0.0f;                      // Sum of position x seconds
@@ -101,7 +108,34 @@ unsigned long windowStepMaxUs = 0;          // Longest control step
 unsigned long windowPeriodMaxUs = 0;        // Longest time between control steps
 unsigned long lastStepUs = 0;
 
+// ---- Run state kept through a reset ----
+// A brown-out (motors pulling the supply down) resets the Nano mid-run. The C
+// startup code leaves .noinit RAM alone, so this copy of the run state, taken
+// every control step, survives the reset and setup() carries the run on with
+// no PC involved. A power-on fills RAM with noise, so the check fails and the
+// rover starts stopped as usual. buildId stops a fresh upload resuming a run.
+struct ResumeState {
+  uint32_t buildId;
+  Mode mode;
+  bool running;
+  int baseSpeed;
+  int lastTurn;
+  int8_t lastLeftPercent;       // Wheel commands at the reset, so a turn carries on
+  int8_t lastRightPercent;
+  byte lastWhiteSide;
+  bool bangRealign;
+  int whiteLevel[SENSOR_COUNT];
+  int blackLevel[SENSOR_COUNT];
+  byte calibrationResult;
+  ModeTuning tuning[MODE_COUNT];
+  uint16_t check;               // resumeCheck() of everything above
+};
+ResumeState resumeState __attribute__((section(".noinit")));
+uint32_t thisBuild = 0;
+bool resumedAfterReset = false;  // This run was carried on through a reset
+
 // ---- Timers ----
+unsigned long runStartMs = 0;               // For the soft start
 unsigned long lastControlMs = 0;
 unsigned long lastTelemetryMs = 0;
 unsigned long lastTuningMs = 0;
@@ -122,14 +156,22 @@ byte speedToDac(int speedPercent, int motorDir) {
   return DAC_NEUTRAL + (long)motorDir * speedPercent * DAC_SPAN / SPEED_MAX;
 }
 
+// Writes the last wheel commands to the DACs, scaled down during the soft start.
+void writeWheels() {
+  long scale = SPEED_MAX;
+  unsigned long sinceStart = millis() - runStartMs;
+  if (running && sinceStart < SOFT_START_MS) scale = SPEED_MAX * sinceStart / SOFT_START_MS;
+  dacLeft = speedToDac(lastLeftPercent * scale / SPEED_MAX, LEFT_MOTOR_DIR);
+  dacRight = speedToDac(lastRightPercent * scale / SPEED_MAX, RIGHT_MOTOR_DIR);
+  writeDac(DAC_LEFT_PINS, dacLeft);
+  writeDac(DAC_RIGHT_PINS, dacRight);
+}
+
 // Speeds are -100..100 % of full speed, positive = forwards for that wheel.
 void setWheelSpeeds(int leftPercent, int rightPercent) {
   lastLeftPercent = constrain(leftPercent, -SPEED_MAX, SPEED_MAX);
   lastRightPercent = constrain(rightPercent, -SPEED_MAX, SPEED_MAX);
-  dacLeft = speedToDac(leftPercent, LEFT_MOTOR_DIR);
-  dacRight = speedToDac(rightPercent, RIGHT_MOTOR_DIR);
-  writeDac(DAC_LEFT_PINS, dacLeft);
-  writeDac(DAC_RIGHT_PINS, dacRight);
+  writeWheels();
 }
 
 void holdNeutral() {
@@ -209,13 +251,19 @@ void clearHistory() {
   historyCount = 0;
 }
 
+// The GUI resends START until telemetry shows the rover running, so a START
+// that arrives mid-run is ignored instead of restarting the run.
 void startRun() {
-  if (calibrating) return;
+  if (calibrating || running) return;
   running = true;
+  runStartMs = millis();
   clearHistory();
   lineLost = false;
   lineWasCentred = false;
   lastTurn = liveTuning[mode].defaultTurn;
+  // Until one sensor has seen white alone, both-black turns the default way.
+  lastWhiteSide = lastTurn == TURN_CLOCKWISE ? SENSOR_RIGHT : SENSOR_LEFT;
+  bangRealign = false;
   lastPosition = position;
   integral = 0.0f;
   filteredDerivative = 0.0f;
@@ -228,7 +276,73 @@ void startRun() {
 
 void stopRun() {
   running = false;
+  resumedAfterReset = false;
   holdNeutral();
+}
+
+// ============================================================
+// Carrying a run on through a reset (see ResumeState)
+// ============================================================
+uint32_t buildId() {
+  const char* text = __DATE__ __TIME__;
+  uint32_t hash = 2166136261UL;             // FNV-1a
+  while (*text) hash = (hash ^ (byte)*text++) * 16777619UL;
+  return hash;
+}
+
+// Fletcher-style sums that just wrap (no modulo: a divide per byte would cost
+// several ms every control step on the AVR). Random power-on RAM still fails it.
+uint16_t resumeCheck() {
+  const byte* bytes = (const byte*)&resumeState;
+  uint16_t sum1 = 0, sum2 = 0;
+  for (size_t i = 0; i < offsetof(ResumeState, check); i++) {
+    sum1 += bytes[i];
+    sum2 += sum1;
+  }
+  return sum2 ^ (sum1 << 8);
+}
+
+void saveResumeState() {
+  resumeState.buildId = thisBuild;
+  resumeState.mode = mode;
+  resumeState.running = running;
+  resumeState.baseSpeed = baseSpeed;
+  resumeState.lastTurn = lastTurn;
+  resumeState.lastLeftPercent = lastLeftPercent;
+  resumeState.lastRightPercent = lastRightPercent;
+  resumeState.lastWhiteSide = lastWhiteSide;
+  resumeState.bangRealign = bangRealign;
+  for (byte s = 0; s < SENSOR_COUNT; s++) {
+    resumeState.whiteLevel[s] = whiteLevel[s];
+    resumeState.blackLevel[s] = blackLevel[s];
+  }
+  resumeState.calibrationResult = calibrationResult;
+  memcpy(resumeState.tuning, liveTuning, sizeof(liveTuning));
+  resumeState.check = resumeCheck();
+}
+
+// Called once in setup(), after liveTuning holds the config.h defaults.
+void resumeAfterReset() {
+  if (resumeState.buildId != thisBuild || resumeState.check != resumeCheck() ||
+      resumeState.mode >= MODE_COUNT) {
+    return;                                 // Power-on or new upload: start stopped
+  }
+  mode = resumeState.mode;
+  baseSpeed = resumeState.baseSpeed;
+  for (byte s = 0; s < SENSOR_COUNT; s++) {
+    whiteLevel[s] = resumeState.whiteLevel[s];
+    blackLevel[s] = resumeState.blackLevel[s];
+  }
+  calibrationResult = resumeState.calibrationResult;
+  memcpy(liveTuning, resumeState.tuning, sizeof(liveTuning));
+  if (resumeState.running) {
+    startRun();
+    lastTurn = resumeState.lastTurn;
+    lastWhiteSide = resumeState.lastWhiteSide == SENSOR_LEFT ? SENSOR_LEFT : SENSOR_RIGHT;
+    bangRealign = resumeState.bangRealign;
+    setWheelSpeeds(resumeState.lastLeftPercent, resumeState.lastRightPercent);  // Soft-started
+    resumedAfterReset = true;
+  }
 }
 
 void setMode(byte newMode) {
@@ -454,25 +568,42 @@ int dutyToSpeed(int duty) {
 // The wheel on the OPPOSITE side then drops to its pwmCorrect* duty, which
 // steers back onto the line. Between WHITE_BELOW and BLACK_ABOVE a sensor
 // counts as still on the line. steerSign = -1 swaps the sides if this steers
-// the wrong way on test. There is no lost-line search here: with both sensors
-// black the rover keeps its last wheel command (or the centred levels at the
-// start of a run, before it has made one) until a sensor sees the line again.
+// the wrong way on test. With both sensors black the rover turns towards the
+// sensor that last saw white (lastWhiteSide), exactly as if only the other
+// sensor were black. When that turn brings both sensors back onto white it
+// keeps turning (realign) until exactly one sensor sees black, i.e. the rover
+// is lined up with an edge. Going straight there instead jumped the stopped
+// wheel 0 -> full and shot the rover across a line it met at an angle.
 void updateBangBang(unsigned long now) {
   const ModeTuning& tuning = liveTuning[mode];
   lineLost = false;
 
   bool leftBlack = normLevel[SENSOR_LEFT] > BLACK_ABOVE;
   bool rightBlack = normLevel[SENSOR_RIGHT] > BLACK_ABOVE;
-  if (leftBlack && rightBlack) controlState = STATE_BANG_BOTH_BLACK;
-  if (leftBlack && rightBlack && (lastLeftPercent != 0 || lastRightPercent != 0)) return;
+  if (leftBlack != rightBlack) {
+    lastWhiteSide = leftBlack ? SENSOR_RIGHT : SENSOR_LEFT;
+    bangRealign = false;              // Aligned with an edge: normal bang-bang again
+  }
+  bool bothBlack = leftBlack && rightBlack;
+  if (bothBlack) bangRealign = true;
+  bool turnToLastWhite = bothBlack || bangRealign;
+  if (turnToLastWhite) {
+    // Turn towards the last white sensor: treat the other one as the black one.
+    leftBlack = lastWhiteSide == SENSOR_RIGHT;
+    rightBlack = !leftBlack;
+  }
   if (tuning.steerSign < 0) {
     bool swap = leftBlack;
     leftBlack = rightBlack;
     rightBlack = swap;
   }
-  if (rightBlack != leftBlack) {
+  if (bothBlack) {
+    controlState = STATE_BANG_BOTH_BLACK;
+  } else if (bangRealign) {
+    controlState = STATE_BANG_REALIGN;
+  } else if (rightBlack != leftBlack) {
     controlState = rightBlack ? STATE_BANG_LEFT : STATE_BANG_RIGHT;  // Slowed wheel's side
-  } else if (!rightBlack) {
+  } else {
     controlState = STATE_BANG_STRAIGHT;
   }
   setWheelSpeeds(dutyToSpeed(rightBlack ? tuning.pwmCorrectLeft : tuning.pwmStraightLeft),
@@ -666,7 +797,7 @@ void sendDebug() {
     tenthsOfMs(windowStepMaxUs),
     tenthsOfMs(windowPeriodMaxUs),
     lostEvents,
-    (byte)(saturatedNow ? DEBUG_SATURATED : 0),
+    (byte)((saturatedNow ? DEBUG_SATURATED : 0) | (resumedAfterReset ? DEBUG_RESUMED : 0)),
     0
   };
   sendFrame(frame, DEBUG_FRAME_LENGTH);
@@ -740,6 +871,8 @@ void setup() {
     pinMode(DAC_RIGHT_PINS[bit], OUTPUT);
   }
   holdNeutral();
+  thisBuild = buildId();
+  resumeAfterReset();
 
 #if LINK_USE_SOFTWARE_SERIAL
   softLink.begin(LINK_BAUD);
@@ -769,9 +902,13 @@ void loop() {
       updateCalibration(now);
     } else if (running) {
       updateLineFollower(now);
+      // Bang-bang can keep its last command without a new setWheelSpeeds, so the
+      // soft-start ramp is written here too.
+      if (now - runStartMs <= SOFT_START_MS + CONTROL_PERIOD_MS) writeWheels();
     } else {
       controlState = STATE_IDLE;
     }
+    saveResumeState();
 
     windowStepMaxUs = max(windowStepMaxUs, micros() - stepStartUs);
     windowSteps++;

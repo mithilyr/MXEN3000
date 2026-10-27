@@ -6,8 +6,9 @@ XBee shows up as a COM port). Everything the supervisor needs during a
 timed run is on the keyboard:
 
     1 2 3 4   select Clockwise / Anticlockwise / Squiggle / Reverse
-    Space     start / stop
-    Esc       emergency stop (always stops)
+    Space     start / stop - the ONLY way the GUI starts or stops the rover
+              (resent until the rover confirms; nothing else ever sends STOP)
+    Esc       leave a box that has the cursor, so the hotkeys work again
     Up/Down   change base speed
     C         calibrate sensors (sweep the rover across the line)
     T         next steering controller for this mode (PID / bang-bang / adaptive),
@@ -87,7 +88,8 @@ DEFAULT_LOG_FILE = "run-log.csv"
 RUN_LOG_HEADER = ["date", "division", "attempt", "time_s", "result", "notes", "track", "note"]
 TRACKS = ("Test", "Competition")   # Runs and optimiser ratings are kept apart per track
 SESSION_FILE = "session.json"   # The last selected track and mode
-NOTE_WIDTH = 34                 # Characters
+RUN_RESEND_S = 0.25             # Gap between resends of a Space start/stop the rover has not confirmed
+RUN_GIVE_UP_S = 2.0             # Then stop resending and say so
 TUNING_FILE = "tuning.json"     # In SETTINGS_DIR, one entry per mode
 PWM_FILE = "pwm_levels.json"    # Bang-bang wheel levels from the PWM test window, one entry per mode
 PWM_STEP = 5                    # Up/down button increment, % duty (any value can be typed)
@@ -97,6 +99,8 @@ XBEE_FILE = "xbee.json"         # Pair XBees: PAN ID and both serial numbers
 PAIR_POLL_MS = 50
 TUNING_CONFIRM_S = 0.6          # Wait this long for the rover to echo a change
 MODE_RESEND_S = 0.6             # Gap between attempts to put the rover back in the session mode
+CONTROLLER_RESEND_S = 0.3       # Gap between resends of a T change the rover has not echoed yet
+CONTROLLER_GIVE_UP_S = 3.0      # Then stop resending and show what the rover really has
 # Hotkey pairs (increase, decrease) for the tuning slots of the current controller.
 TUNING_KEYS = (("q", "a"), ("w", "s"), ("e", "d"), ("r", "f"))
 TUNING_SLOTS = {
@@ -274,7 +278,9 @@ class RoverGUI:
         self.pwm_target = {}            # (mode, field): requested wheel level the rover has not echoed
         self.tuning_sent = 0.0
         self.controller_target = None   # Controller asked for with T, until the rover echoes it
-        self.controller_sent = 0.0
+        self.controller_sent = 0.0      # Last (re)send of controller_target
+        self.controller_asked = 0.0     # When T asked for controller_target
+        self.run_request = None         # Last Space START / STOP, until the rover confirms it
         self.level_range = {}           # Sensor side -> (lowest, highest) level since reset
         self.widget_cache = {}          # Last options set by _set_widget
         self.calibrated = False
@@ -512,11 +518,8 @@ class RoverGUI:
         self.timer_label.pack(side=tk.RIGHT)
         self.detail_label = ttk.Label(panel, text="", style="Panel.TLabel")
         self.detail_label.pack(anchor=tk.W, pady=(0, 4))
-        buttons = ttk.Frame(panel, style="Plain.TFrame")
-        buttons.pack(fill=tk.X)
-        self._button(buttons, "START / STOP  [Space]", self.toggle_run, "primary").pack(fill=tk.X)
-        self._button(buttons, "EMERGENCY STOP  [Esc]", self.stop_run,
-                     "danger").pack(fill=tk.X, pady=4)
+        ttk.Label(panel, text="Space = START / STOP (the only start/stop control)",
+                  style="Panel.TLabel", font=(FONT_FAMILY, 11, "bold")).pack(anchor=tk.W, pady=(0, 4))
 
         tracks = ttk.Frame(panel, style="Plain.TFrame")
         tracks.pack(fill=tk.X)
@@ -525,17 +528,8 @@ class RoverGUI:
             ttk.Radiobutton(tracks, text=name, value=name, variable=self.track_name,
                             style="Panel.TRadiobutton", command=self.select_track,
                             takefocus=0).pack(side=tk.LEFT, padx=(0, 12))
-        notes = ttk.Frame(panel, style="Plain.TFrame")
-        notes.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(notes, text="Note on last run:", style="Muted.TLabel").pack(side=tk.LEFT,
-                                                                           padx=(0, 8))
-        self.note_entry = ttk.Entry(notes, width=NOTE_WIDTH)
-        self.note_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.note_entry.bind("<Return>", self.save_note)
-        self.note_hint = ttk.Label(panel, text="Click the box, type, Enter to save."
-                                               " Hotkeys pause while typing (Esc still stops).",
-                                   style="Muted.TLabel")
-        self.note_hint.pack(anchor=tk.W)
+        self.note_hint = ttk.Label(panel, text="", style="Muted.TLabel")  # Start/stop confirmation
+        self.note_hint.pack(anchor=tk.W, pady=(4, 0))
 
     def _build_mode_panel(self, parent):
         panel = self._panel(parent, "MODE  (keys 1-4, only while stopped)", fill=tk.X)
@@ -723,7 +717,7 @@ class RoverGUI:
     def _bind_keys(self):
         bind = self._bind_hotkey
         bind("<space>", self.toggle_run)
-        self.root.bind_all("<Escape>", self._on_escape)    # Works while typing too
+        self.root.bind_all("<Escape>", self._on_escape)    # Leaves a text box; never stops
         bind("<Up>", lambda: self.change_speed(SPEED_STEP))
         bind("<Down>", lambda: self.change_speed(-SPEED_STEP))
         bind("<KeyPress-c>", self.calibrate)
@@ -751,12 +745,11 @@ class RoverGUI:
         return isinstance(widget, (tk.Entry, ttk.Entry)) and not isinstance(widget, ttk.Combobox)
 
     def _bind_hotkey(self, sequence, action):
-        """A window-wide hotkey that does nothing while the note box has the cursor."""
+        """A window-wide hotkey that does nothing while a text box has the cursor."""
         self.root.bind_all(sequence, lambda _event: None if self._typing() else action())
 
     def _on_escape(self, _event):
-        self.stop_run()
-        self.root.focus_set()          # Leave the note box, so the hotkeys work again
+        self.root.focus_set()          # Leave a text box, so the hotkeys work again
 
     # ================================================================
     # Connection
@@ -768,8 +761,7 @@ class RoverGUI:
             self.port_box.current(0)
 
     def toggle_connection(self):
-        if self.link.is_open:
-            self.link.send(p.CMD_STOP)
+        if self.link.is_open:          # No STOP: only Space stops the rover
             self.link.close()
             self.pwm_applied = False
             self.connect_button.config(text="Connect")
@@ -867,19 +859,56 @@ class RoverGUI:
     # Commands
     # ================================================================
     def toggle_run(self):
-        if self.rover_running() or self.run_start is not None:
+        """Space. The only place START or STOP is sent. With no telemetry the rover
+        cannot be started, so Space then always means STOP."""
+        if not self.link_alive() or self.rover_running() or self.run_start is not None:
             self.stop_run()
         else:
             self.start_run()
 
-    def start_run(self):
-        if not self.link_alive():
-            self.detail_label.config(text="No telemetry from rover - check XBee link")
+    def _request_run(self, command):
+        """Send START / STOP now; _keep_run_request resends it until the rover confirms."""
+        now = time.monotonic()
+        self.run_request = {"command": command, "asked": now, "sent": now}
+        self.link.send(command)
+
+    def _keep_run_request(self):
+        """A single radio command can be lost, so the last Space command is resent
+        until the rover's running flag matches it, for up to RUN_GIVE_UP_S. The
+        firmware ignores a START while it is already running, so a resend never
+        restarts a run."""
+        request = self.run_request
+        if request is None:
             return
+        want_running = request["command"] == p.CMD_START
+        name = "START" if want_running else "STOP"
+        if self.link_alive() and self.telemetry.running == want_running:
+            self.run_request = None
+            self.note_hint.config(text=f"Rover confirmed {name}", foreground=COLOUR_OK)
+            return
+        now = time.monotonic()
+        if now - request["asked"] > RUN_GIVE_UP_S:
+            self.run_request = None
+            self.note_hint.config(text=f"Rover did not confirm {name} - check the link, "
+                                       f"press Space again", foreground=COLOUR_WARN)
+            if want_running and self.link_alive():
+                self._cancel_run()          # It never started: no run to time or log
+            return
+        if now - request["sent"] > RUN_RESEND_S and self.link.send(request["command"]):
+            request["sent"] = now
+
+    def _cancel_run(self):
+        self.run_start = None
+        self.run_stats = None
+        self._close_sample_log()
+
+    def start_run(self):
         mode = self.selected_mode.get()
         if self.telemetry.mode != mode:
             self.link.send(p.CMD_SET_MODE, mode)  # Resets speed to that mode's default
-        if self.link.send(p.CMD_START):
+        if self.link.is_open:
+            self._request_run(p.CMD_START)
+            self.note_hint.config(text="START sent", foreground=COLOUR_TEXT)
             self.run_start = time.monotonic()
             self.run_mode = mode
             self.run_track = self.track_name.get()
@@ -890,7 +919,8 @@ class RoverGUI:
             self._open_sample_log(mode)
 
     def stop_run(self):
-        self.link.send(p.CMD_STOP)
+        self._request_run(p.CMD_STOP)
+        self.note_hint.config(text="STOP sent", foreground=COLOUR_TEXT)
         self._finish_run("stopped by operator")
 
     def select_track(self):
@@ -945,9 +975,29 @@ class RoverGUI:
             return
         if self.link.send(p.CMD_SET_CONTROLLER, controller):
             self.controller_target = controller
-            self.controller_sent = time.monotonic()
-            self.tuning_status.config(text=f"Controller: {p.CONTROLLER_NAMES[controller]}")
+            self.controller_sent = self.controller_asked = time.monotonic()
+            self.tuning_status.config(text=f"Controller: {p.CONTROLLER_NAMES[controller]} (sending)")
         self.selected_controller.set(self._controller())
+
+    def _keep_controller(self):
+        """A single radio command can be lost, so a T change is resent until the
+        rover echoes it in a tuning frame, for up to CONTROLLER_GIVE_UP_S."""
+        target = self.controller_target
+        if target is None or self.tuning is None:
+            return
+        name = p.CONTROLLER_NAMES[target]
+        if self.tuning.controller == target:
+            self.controller_target = None
+            self.tuning_status.config(text=f"Controller: {name}")
+            return
+        now = time.monotonic()
+        if now - self.controller_asked > CONTROLLER_GIVE_UP_S:
+            self.controller_target = None
+            self.tuning_status.config(text=f"Rover did not take {name} - check the XBee link")
+            return
+        if now - self.controller_sent > CONTROLLER_RESEND_S and \
+                self.link.send(p.CMD_SET_CONTROLLER, target):
+            self.controller_sent = now
 
     def cycle_controller(self):
         self.select_controller((self._controller() + 1) % len(p.CONTROLLER_NAMES))
@@ -1102,32 +1152,6 @@ class RoverGUI:
             rows[0] = RUN_LOG_HEADER
             self._write_log(rows)
 
-    def save_note(self, _event=None):
-        """Writes the note box into the last run's row of the run log."""
-        note = self.note_entry.get().strip()
-        self.root.focus_set()          # Hotkeys work again
-        if not note:
-            return
-        if self.last_log_row is None:
-            self.note_hint.config(text="No run to attach the note to yet.")
-            return
-        note_column = RUN_LOG_HEADER.index("note")
-        try:
-            rows = self._read_log()
-            for row in reversed(rows):
-                if row[:note_column] == self.last_log_row[:note_column]:
-                    row[note_column:] = [note]
-                    break
-            else:
-                self.note_hint.config(text="The last run is not in the log file any more.")
-                return
-            self._write_log(rows)
-        except OSError as error:
-            self.note_hint.config(text=f"Could not save the note: {error}")
-            return
-        self.history.set(self.last_history_item, "note", note)
-        self.note_entry.delete(0, tk.END)
-        self.note_hint.config(text=f"Saved on the last run: {note}")
 
     # One CSV per run with every telemetry sample (about 20 per second), so
     # IR readings can be plotted and thresholds tuned after the run.
@@ -1385,6 +1409,7 @@ class RoverGUI:
     # ================================================================
     def _refresh(self):
         self._drain_messages()
+        self._keep_run_request()
         self._update_link_label()
         self._update_run_labels()
         self._update_lamps()
@@ -1459,7 +1484,9 @@ class RoverGUI:
             self.timer_label.config(text=f"{time.monotonic() - self.run_start:.3f} s")
         t = self.telemetry
         if not self.link_alive():
-            self.state_label.config(text="NO LINK", foreground=COLOUR_WARN)
+            # The rover runs on by itself; only Space stops it.
+            text = "NO LINK - rover still running" if self.run_start is not None else "NO LINK"
+            self.state_label.config(text=text, foreground=COLOUR_WARN)
             return
         if t.calibrating:
             state, colour = "CALIBRATING", COLOUR_WARN
@@ -1472,10 +1499,13 @@ class RoverGUI:
         flags = [p.MODE_NAMES[t.mode], p.CONTROLLER_NAMES.get(self._controller(), "")]
         if t.line_lost:
             flags.append("LINE LOST")
+        if t.running and self.debug_alive() and self.debug.resumed:
+            flags.append("ROVER RESET MID-RUN (carried on - check the supply)")
         self.detail_label.config(text="   ".join(flags))
         self.speed_label.config(text=f"Base speed: {t.speed} %")
         self._update_wheels(t)
         self._keep_session_mode(t)
+        self._keep_controller()
         if self.tuning is not None and self.selected_controller.get() != self._controller():
             self.selected_controller.set(self._controller())
         self._update_readout(t)
@@ -1540,9 +1570,8 @@ class RoverGUI:
         self._apply_saved_pwm()
         if mode_changed or time.monotonic() - self.tuning_sent > TUNING_CONFIRM_S:
             self.tuning_target.clear()
-        # Echoed, or not taken within the confirm time (old firmware refuses while running).
-        if mode_changed or tuning.controller == self.controller_target or \
-                time.monotonic() - self.controller_sent > TUNING_CONFIRM_S:
+        # A new mode has its own controller; echo and give-up are handled by _keep_controller.
+        if mode_changed:
             self.controller_target = None
 
     def _tuning_note(self):
@@ -1714,10 +1743,9 @@ class RoverGUI:
         if t.calibrating:
             return "Slide the rover slowly across the line"
         if t.running:
-            return "Running - Space to stop, Esc for emergency stop, Up/Down for speed"
+            return "Running - Space to stop, Up/Down for speed"
         if self.unrated_run is not None:
-            return ("Rate the run: Y = clean lap, N = failed. Then click the note box,"
-                    " type, Enter")
+            return "Rate the run: Y = clean lap, N = failed"
         if not self.calibrated:
             return "Press C and sweep the rover across the line (optional for 1/0 sensors)"
         return f"Mode: {p.MODE_NAMES[t.mode]} - put the rover on the line and press Space"
@@ -1756,8 +1784,7 @@ class RoverGUI:
         plot(self.chart["position"], position_to_y, COLOUR_POSITION)
 
     def on_close(self):
-        self.link.send(p.CMD_STOP)
-        self.link.close()
+        self.link.close()              # No STOP: only Space stops the rover
         self._close_sample_log()
         self.root.destroy()
 

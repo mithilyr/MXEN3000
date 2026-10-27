@@ -86,6 +86,7 @@ constexpr byte DEBUG_FRAME_LENGTH = 17;
 constexpr int SIGNED_OFFSET = 127;
 constexpr byte SEQ_COUNT = 254;           // seq runs 0..253, so lost frames can be counted
 constexpr byte DEBUG_SATURATED = 0x01;    // Flags: the steering hit maxTurn this step
+constexpr byte DEBUG_RESUMED = 0x02;      // Flags: this run was carried on through a Nano reset
 
 // What the controller is doing (debug frame "state")
 enum ControlState : byte {
@@ -100,7 +101,8 @@ enum ControlState : byte {
   STATE_BANG_STRAIGHT = 8,
   STATE_BANG_LEFT = 9,        // Bang-bang: left wheel slowed (turning left)
   STATE_BANG_RIGHT = 10,      // Bang-bang: right wheel slowed (turning right)
-  STATE_BANG_BOTH_BLACK = 11
+  STATE_BANG_BOTH_BLACK = 11,
+  STATE_BANG_REALIGN = 12     // Bang-bang: back on white after both-black, still turning until aligned
 };
 
 // ---- Calibration levels (rover -> PC), sent with every tuning frame ----
