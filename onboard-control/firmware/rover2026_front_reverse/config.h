@@ -110,6 +110,6 @@ struct ModeTuning {
 // then copy the best values from the GUI back into this table.
 constexpr ModeTuning MODE_TUNING[MODE_COUNT] = {
   // base  steer  strL strR corL corR
-  {  45,   1,     65,  65,  50,  50 },  // Front
-  {  25,   1,     35,  35,  50,  50 },  // Reverse
+  {  45,   1,     85,  85,  50,  50 },  // Front
+  {  25,   1,     40,  40,  35,  35 },  // Reverse
 };
